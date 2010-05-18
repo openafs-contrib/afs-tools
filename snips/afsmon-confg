@@ -1,0 +1,23 @@
+#
+# afsmon - AFS SNIPS monitor config
+#
+
+# general options
+option pollinterval 300  # seconds
+option rrdtool      off
+option domain       sinenomine.net
+option maxparts     26
+
+# paths to AFS commands, should be local
+cmd bos /usr/bin/bos
+cmd vos /usr/bin/vos
+cmd rxdebug /usr/bin/rxdebug
+
+# thresholds: warning, error, critical
+threshold calls_waiting  100 200 500
+threshold partition       80  90  95
+
+# fileservers
+fs pluto
+fs mars
+fs venus
