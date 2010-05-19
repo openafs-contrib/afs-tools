@@ -248,6 +248,10 @@ sub dopoll
       check_calls_waiting($fs);
       check_partitions($fs);
     }
+    else {
+      $fs->{'calls_waiting'} = undef;
+      $fs->{'partitions'} = {};
+    }
   }
   update_event_file();
   return 1;
