@@ -55,9 +55,9 @@ cell if not speficied.
 =head1 EXAMPLES
 
     $ afs-get-versions
-    1.4.7 2009-07-18 afs03.sinenomine.net (72.73.25.18)
-    1.4.12 2010-03-09 afs05.sinenomine.net (72.73.30.76)
-    1.4.12 2010-03-09 afs01.sinenomine.net (74.121.192.45)
+    afs02.sinenomine.net (72.73.25.18) OpenAFS 1.4.7 built  2009-07-18
+    afs04.sinenomine.net (72.73.30.76) OpenAFS 1.4.12 built  2010-03-09
+    afs01.sinenomine.net (74.121.192.45) OpenAFS 1.4.12 built  2010-03-09
 
 =head1 COPYRIGHT
 
@@ -85,7 +85,7 @@ while(<VOS>) {
     my $addresses = $_;
     foreach my $address (split /\s+/) {
         open(RXDEBUG, "rxdebug $address 7000 -version |") or die "Failed to run rxdebug: $!";
-        my ($ip, $version_string, $version_number, $build_date);
+        my ($ip, $version_string);
         while (<RXDEBUG>) {
             chomp;
             if (/^Trying (.*) \(port 7000\)/) {
@@ -93,17 +93,9 @@ while(<VOS>) {
                 next;
             }
             if (/^AFS version:  (.*)/) {
-                $ip = "<unknown>" unless $ip;
                 $version_string = $1;
-                if ($version_string =~ /^OpenAFS\s+(.*)\s+built\s+(.*)/) {
-                    $version_number = $1;
-                    $build_date = $2;
-                    $build_date =~ s/\s+$//;
-                    print("$version_number $build_date $address ($ip)\n");
-                }
-                else {
-                    print("** $version_string $address ($ip)\n");
-                }
+                $ip = "<unknown>" unless $ip;
+                print("$address ($ip) $version_string\n");
                 last;
             }
         }
@@ -112,8 +104,6 @@ while(<VOS>) {
             warn("Warning: Could not find version for fileserver $address ".
                  ($ip ? "($ip)\n" : "\n"));
         }
-
     }
 }
 close VOS;
-
