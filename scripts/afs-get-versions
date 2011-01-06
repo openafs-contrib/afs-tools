@@ -1,0 +1,119 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2011, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# Originally written by Michael Meffie <mmeffie@sinenomine.net>
+#
+
+=head1 NAME
+
+afs-get-versions - report afs server versions
+
+=head1 SYNOPSIS
+
+B<afs-get-versions> [B<--cell> <I<cellname>>]
+
+=head1 DESCRIPTION
+
+B<afs-get-versions> reports the versions of the fileservers in an AFS cell.
+B<afs-get-versions> uses B<vos listaddrs> to retreive the list of fileserver in
+the cell and then calls B<rxdebug> on each server to find the version
+information.
+
+If a server listed by B<vos listaddrs> cannot be reached, the following is
+reported,
+
+    Warning: Could not find version for fileserver <address>
+
+Verify the server listed by <address> is still an active file server, and if
+not, remove the obsolete server entry. To remove obsolete server entries, use
+the B<vos changeaddr> command with the B<-remove> argument.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--cell> <I<cellname>>
+
+Names the cell in which to run the command. Uses the local
+cell if not speficied.
+
+=back
+
+=head1 EXAMPLES
+
+    $ afs-get-versions
+    1.4.7 2009-07-18 afs03.sinenomine.net (72.73.25.18)
+    1.4.12 2010-03-09 afs05.sinenomine.net (72.73.30.76)
+    1.4.12 2010-03-09 afs01.sinenomine.net (74.121.192.45)
+
+=head1 COPYRIGHT
+
+Copyright (c) 2011, Sine Nomine Associates
+All rights reserved.
+
+=cut
+
+use Getopt::Long;
+use Pod::Usage;
+
+my $opt_cell = undef;
+my $opt_help = 0;
+GetOptions(
+    "cell|c=s"  => \$opt_cell,
+    "help|h|?"  => \$opt_help,
+) or pod2usage(2);
+pod2usage(1) if $opt_help;
+
+my $vopts = "-noauth ". ($opt_cell ? "-cell $opt_cell" : "");
+
+open(VOS, "vos listaddrs $vopts |") or die "Failed to run vos listaddrs: $!";
+while(<VOS>) {
+    chomp;
+    my $addresses = $_;
+    foreach my $address (split /\s+/) {
+        open(RXDEBUG, "rxdebug $address 7000 -version |") or die "Failed to run rxdebug: $!";
+        my ($ip, $version_string, $version_number, $build_date);
+        while (<RXDEBUG>) {
+            chomp;
+            if (/^Trying (.*) \(port 7000\)/) {
+                $ip = $1;
+                next;
+            }
+            if (/^AFS version:  (.*)/) {
+                $ip = "<unknown>" unless $ip;
+                $version_string = $1;
+                if ($version_string =~ /^OpenAFS\s+(.*)\s+built\s+(.*)/) {
+                    $version_number = $1;
+                    $build_date = $2;
+                    $build_date =~ s/\s+$//;
+                    print("$version_number $build_date $address ($ip)\n");
+                }
+                else {
+                    print("** $version_string $address ($ip)\n");
+                }
+                last;
+            }
+        }
+        close RXDEBUG;
+        unless ($version_string) {
+            warn("Warning: Could not find version for fileserver $address ".
+                 ($ip ? "($ip)\n" : "\n"));
+        }
+
+    }
+}
+close VOS;
+
