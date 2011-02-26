@@ -6,8 +6,8 @@ afs-audit-volumes
 
 =head1 SYNOPSIS
 
-afs-audit-volumes [--listvldb file] [--min-replicas n] 
-  [--ignore-domain] [--quiet] [file ...]
+afs-audit-volumes --listvldb file [--min-replicas n]
+  [--ignore-domain] [--quiet] listvol.out ...
 
 
 =head1 OPTIONS
@@ -26,13 +26,13 @@ Print suggested AFS commands to correct detected errors.
 
 Minimum number of recommended read-only volumes. Default is 1.
 
-=item B<--ignore-domain> 
+=item B<--ignore-domain>
 
 Ingore the domain name from vldb entries to match the
 server names in the vos listvol output. This is necessary when
 host name resolution is not consistent.
 
-=item B<--quiet|-q> 
+=item B<--quiet|-q>
 
 Less messages.
 
@@ -45,7 +45,7 @@ Print syntax.
 =head1 DESCRIPTION
 
 This script scans the output of a previously run 'vos listvld'
-and 'vos listvol' for each server to search for potential 
+and 'vos listvol' for each server to search for potential
 problems and inconsistences.
 
 =head2 Server Names
@@ -53,7 +53,7 @@ problems and inconsistences.
 The server host names reported by vos are resolved by
 ip to name look ups.  Depending on how names are resolved,
 the server names may be fully qualified or may just contain
-the host name.  In these cases, the --ignore-domain 
+the host name.  In these cases, the --ignore-domain
 can be used to attempt to ignore domain names.
 
 For example, if the output of vos listvldb is of the form,
@@ -77,7 +77,7 @@ but the output of vos listvol is,
   my.vol.readonly             1819084419 RO    1836860 K On-line
   ...
 
-then, the --ignore-domain option should be used to force the 
+then, the --ignore-domain option should be used to force the
 script to ignore the mydomain.com in the vos listvldb entries.
 
 =head2 Errors Reported
@@ -108,23 +108,23 @@ master read-write volume. This reduces the amount of free disk space.
 =item VLDB missing read-write
 
 A VLDB entry does not have a read-write volume. Changes to the read-only
-volumes are not possible. 
+volumes are not possible.
 
-=item VLDB too many read-write 
+=item VLDB too many read-write
 
-A VLDB entry has multiple read-write sites. 
+A VLDB entry has multiple read-write sites.
 
 =item VLDB duplicate name
 
 A duplicate volume name was detected in the VLDB.
 
-=item VLDB duplicate id  
+=item VLDB duplicate id
 
 A duplicate id was detected in the VLDB.
 
-=item Not enough replicas  
+=item Not enough replicas
 
-The recommended number of read-only volumes are not present for 
+The recommended number of read-only volumes are not present for
 a replicated volume. The minimun number is specified with the
 --min-replicas option. The default is 1.
 
@@ -145,7 +145,7 @@ server partition.
 
 =item RW Volume missing in vldb
 
-No vldb entry was found for a read-write volume 
+No vldb entry was found for a read-write volume
 on a fileserver.
 
 =item RO Volume missing in vldb
@@ -169,9 +169,9 @@ Example usage,
 
   # Determine the names of the file servers from the vldb.
   awk '/server/ {print $2}' mycell.listvldb | sort | uniq > myservers
- 
+
   # Retrieve the file server volume lists.
-  for $s in `cat myservers`
+  for s in `cat myservers`
   do
     echo $s; vos listvol $s >$s.listvol
   done
@@ -265,10 +265,10 @@ print_summary();
 
 
 #
-# Read the output of vos listvol for one or more servers. Store 
+# Read the output of vos listvol for one or more servers. Store
 # into the $servers data structure.
 #
-sub read_listvol 
+sub read_listvol
 {
     print "\nReading volume lists...\n" unless $opt_quiet;
     my $server = undef;
@@ -288,7 +288,7 @@ sub read_listvol
         elsif (/Total number of volumes on server (.*) partition \/vicep(.)/) {
             my $server_name = $1;
             my $partition_name = $2;
-    
+
             if ($opt_ignore_domain) {
                 $server_name =~ s/\..*$//;
             }
@@ -297,9 +297,9 @@ sub read_listvol
             my $key = "$server_name:$partition_name";
             if (defined $g_partition_check{$key}) {
                 die "error: Duplicate vos listvol input: $key\n";
-            } 
+            }
             $g_partition_check{$key} = 1;
-    
+
             # save previous partitions
             if (defined $partition) {
                 push(@{$server->{PARTITIONS}}, $partition);
@@ -309,8 +309,8 @@ sub read_listvol
                 RW => [],
                 RO => [],
             };
-    
-            # save previous server list 
+
+            # save previous server list
             if (defined $server && ($server->{NAME} ne $server_name)) {
                 push(@{$g_servers}, $server);
                 $server = undef;
@@ -327,7 +327,7 @@ sub read_listvol
             if (scalar @volume != (STATUS+1)) {
                 die "error: wrong number of listvol fields.\n$_\n";
             }
-    
+
             if ($volume[TYPE] eq 'RW') {
                 push(@{$partition->{RW}}, \@volume);
             }
@@ -336,7 +336,7 @@ sub read_listvol
             }
         }
     }
-            
+
     if (defined $partition) {
         push(@{$server->{PARTITIONS}}, $partition);
     }
@@ -366,7 +366,7 @@ sub read_listvldb
         next if /^VLDB entries/;
         next if /^Total entries:/;
         next if /number of sites/;
-        
+
         if (/^([\w\-\._]+)/) {  # volume name
             $name = $1;
             $rw = undef;
@@ -447,7 +447,7 @@ sub read_listvldb
             else {
                 die "error: Unexpected type in vldb: $_\n";
             }
-            
+
             die "fatal: vldb missing server" unless $server;
             die "fatal: vldb missing partition" unless $partition;
             die "fatal: vldb missing name" unless $name;
@@ -458,7 +458,7 @@ sub read_listvldb
 
             my $site = [$server, $partition, $name, $id, $type, '', '', $status];
             push(@{$sites}, $site);
-        } 
+        }
     }
     if (defined $entry) {
         push(@{$g_vldb}, $entry);
@@ -473,7 +473,7 @@ sub audit_duplicate_ro_id
 {
     print "\nSearching for duplicate read-only volume ids...\n" unless $opt_quiet;
     foreach my $s (@{$g_servers}) {
-        my %hash; 
+        my %hash;
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $v (@{$p->{RO}}) {
                 $key = $v->[ID];
@@ -516,9 +516,9 @@ sub audit_duplicate_ro_name
     }
 }
 
-# 
-# Search for local read-only volumes that are not on the 
-# same partition as the read-write. 
+#
+# Search for local read-only volumes that are not on the
+# same partition as the read-write.
 #
 sub audit_errant_ro
 {
@@ -552,7 +552,7 @@ sub find_errant_ro
                           "on server $ro->[SERVER] $ro->[PARTITION] ".
                           "should be on $rw->[PARTITION]\n";
                     if ($opt_commands) {
-                        print_command_errant_ro($rw, $ro); 
+                        print_command_errant_ro($rw, $ro);
                     }
                 }
             }
@@ -560,7 +560,7 @@ sub find_errant_ro
     }
 }
 
-# 
+#
 # For a given rw volume id, find the corresponding ro id, if one.
 #
 sub find_ro_id
@@ -596,7 +596,7 @@ sub audit_vldb_one_readwrite
 {
     my %hash_name;
     my %hash_id;
-   
+
     print "\nSearching for duplicates in vldb...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $rw = $entry->{SITES}->{RW};
@@ -623,13 +623,13 @@ sub audit_vldb_one_readwrite
 }
 
 #
-# Check for a minumum number of replicas if replicated. 
+# Check for a minumum number of replicas if replicated.
 #
 sub audit_vldb_under_replicated
 {
     my %hash_name;
     my %hash_id;
-    
+
     print "\nChecking for sufficient number of replicas...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $ro = $entry->{SITES}->{RO};
@@ -650,30 +650,29 @@ sub audit_vldb_to_partition_consistency
     print "\nSearching for vldb/fileserver inconsistencies...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $name = $entry->{NAME};
+        my $id = $entry->{ID};
         foreach my $site (@{$entry->{SITES}->{RW}}, @{$entry->{SITES}->{RO}}) {
             next if $site->[STATUS] eq 'not';  # skip not released entries
-            my $sname = $name . ($site->[TYPE] eq 'RO' ? '.readonly' : ''); 
+            my $sname = $name . ($site->[TYPE] eq 'RO' ? '.readonly' : '');
 
             my $v = find_volume_in_partition($site->[ID], $site->[SERVER], $site->[PARTITION], $site->[TYPE]);
             if (!defined $v) {
                 $summary->{AUDIT_VOL_LOCATION}++;
-                print "error: volume location inconsistency, $sname $site->[SERVER] $site->[PARTITION]\n"; 
+                print "error: volume location inconsistency, $sname ($id), $site->[SERVER] $site->[PARTITION]\n";
             }
             else {
                 if ($v->[TYPE] ne $site->[TYPE]) {
                     $summary->{AUDIT_VOL_TYPE}++;
-                    print "error: volume type inconsistency, $sname $site->[SERVER] $site->[PARTITION]\n";
+                    print "error: volume type inconsistency, $sname ($id), $site->[SERVER] $site->[PARTITION]\n";
                 }
                 if ($v->[NAME] ne $sname) {
                     $summary->{AUDIT_VOL_NAME}++;
-                    print "error: volume name inconsistency, $sname $site->[SERVER] $site->[PARTITION]\n";
+                    print "error: volume name inconsistency, $sname ($id), $site->[SERVER] $site->[PARTITION]\n";
                 }
             }
         }
     }
 }
-
-use Data::Dumper;
 
 sub audit_fs_to_vldb_consistency_rw
 {
@@ -700,7 +699,7 @@ sub audit_fs_to_vldb_consistency_rw
                 print "\n";
             }
             else {
-                $volumes->{$id} = $rw; 
+                $volumes->{$id} = $rw;
             }
         }
     }
