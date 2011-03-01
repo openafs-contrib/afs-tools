@@ -1,0 +1,149 @@
+#!/usr/bin/perl -w
+=head1 NAME
+
+afs-vol-paths - list full paths to volumes
+
+=head1 SYNOPSIS
+
+afs-vol-paths [options] [volume ...]
+
+  Options:
+    --mounts  volscan output file
+    --volumes volume name list file
+    --rw      list paths which contain a -rw mount point
+    --help    brief help message
+
+=head1 DESCRIPTION
+
+List the absolute paths to volumes from volscan output.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--mounts>
+
+volscan output file containing mount point info
+
+=item B<--volumes>
+
+=item B<--rw>
+
+Only list paths which contain at least one -rw mount.
+
+=item B<--help>
+
+Print a brief help message and exits.
+
+=back
+
+=cut
+
+use Pod::Usage;
+use Getopt::Long;
+
+my %g_parents;
+
+my $opt_mounts = "mounts";
+my $opt_volumes = "";
+my $opt_rw = 0;
+my $opt_verbose = 0;
+my $opt_help = 0;
+
+GetOptions(
+  "mounts=s" => \$opt_mounts,
+  "volumes=s" => \$opt_volumes,
+  "rw" => \$opt_rw,
+  "verbose" => \$opt_verbose,
+  "help" => \$opt_help) || pod2usage(2);
+
+if ($opt_help) {
+    pod2usage(2);
+}
+
+read_mounts();
+if ($opt_volumes) {
+    open(VOLUMES, $opt_volumes) || die "Cant open volume list data file: $opt_volumes\n";
+    while (<VOLUMES>) {
+        print_paths(trim($_));
+    }
+    close VOLUMES;
+}
+else {
+    foreach my $volume (@ARGV) {
+        print_paths($volume);
+    }
+}
+
+sub trim {
+    my $string = shift;
+    $string =~ s/^\s+//;
+    $string =~ s/\s$//;
+    return $string;
+}
+
+sub read_mounts {
+    open(MOUNTS, "$opt_mounts") || die "Cant open mount point data file: $opt_mounts\n";
+    while (<MOUNTS>) {
+        chomp;
+        my ($vntype, $vtype, $volume, $vid, $fid, $len, $path, $target) = split;
+        next unless $vntype eq 'mountpt';
+        next if $target =~ /\.backup$/; # skip backups
+        next if $target =~ /:/; # skip cross cell
+        my ($rw, $mount) = ($target =~ /(.)(.*)/);
+        $rw = ($rw eq '%' ? 1 : 0);
+
+        unless ($g_parents{$mount}) {
+            $g_parents{$mount} = [];
+        }
+        push(@{$g_parents{$mount}}, {"path"=>$path, "volume"=>$volume, "rw"=>$rw});
+    }
+    close MOUNTS;
+}
+
+sub print_paths {
+    my $volume = shift;
+    my $paths = find_parent_paths([], [$volume], '', 0);
+    if (scalar @{$paths} == 0) {
+        warn("no paths found for volume $volume\n");
+    }
+    else {
+        #foreach (@{$paths}) {
+        #    print "$volume:$_\n";
+        #}
+        print "$volume:", join(":",@{$paths}), "\n";
+    }
+}
+
+sub find_parent_paths {
+    my ($paths, $vols_ref, $path, $rwcount) = @_;
+    my @vols = @{$vols_ref};
+
+    my $volume = $vols[0];
+    my $parents = $g_parents{$volume};
+    if (!$parents) {
+        if ($volume eq 'root.afs') {
+            if ($rwcount || !$opt_rw) {
+                push(@{$paths}, "/afs" . $path);
+            }
+        }
+        else {
+            warn("not mounted: ". join(" <- ", @vols) ."\n");
+        }
+    }
+    else {
+        foreach my $p (@{$parents}) {
+            if (grep { $p->{volume} eq $_ } @vols) {
+                warn("cycle detected: ". join(", ", @vols) ."\n");
+            }
+            else {
+                $paths = find_parent_paths(
+                    $paths,
+                    [$p->{volume}, @vols],
+                    $p->{path} . $path,
+                    $rwcount + $p->{rw});
+            }
+        }
+    }
+    return $paths;
+}
