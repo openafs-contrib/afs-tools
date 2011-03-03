@@ -5,27 +5,25 @@ afs-vol-paths - list full paths to volumes
 
 =head1 SYNOPSIS
 
-afs-vol-paths [options] [volume ...]
+afs-vol-paths [options] [mounts ...]
 
   Options:
-    --mounts  volscan output file
-    --volumes volume name list file
+    --volume  volume name
     --rw      list paths which contain a -rw mount point
     --help    brief help message
 
 =head1 DESCRIPTION
 
-List the absolute paths to volumes from volscan output.
+List the absolute paths to volumes from volscan output from
+each fileserver.
 
 =head1 OPTIONS
 
 =over 8
 
-=item B<--mounts>
+=item B<--volume>
 
-volscan output file containing mount point info
-
-=item B<--volumes>
+Volume name to resolve. Default is to list all volumes.
 
 =item B<--rw>
 
@@ -44,15 +42,13 @@ use Getopt::Long;
 
 my %g_parents;
 
-my $opt_mounts = "mounts";
-my $opt_volumes = "";
+my $opt_volume = "";
 my $opt_rw = 0;
 my $opt_verbose = 0;
 my $opt_help = 0;
 
 GetOptions(
-  "mounts=s" => \$opt_mounts,
-  "volumes=s" => \$opt_volumes,
+  "volume=s" => \$opt_volume,
   "rw" => \$opt_rw,
   "verbose" => \$opt_verbose,
   "help" => \$opt_help) || pod2usage(2);
@@ -61,42 +57,38 @@ if ($opt_help) {
     pod2usage(2);
 }
 
-read_mounts();
-if ($opt_volumes) {
-    open(VOLUMES, $opt_volumes) || die "Cant open volume list data file: $opt_volumes\n";
-    while (<VOLUMES>) {
-        print_paths(trim($_));
-    }
-    close VOLUMES;
+my $mc = 0;
+foreach my $mounts (@ARGV) {
+    read_mounts($mounts);
+    $mc++;
+}
+if ($mc == 0) {
+    read_mounts("-");
+}
+
+if ($opt_volume) {
+    print_paths($opt_volume);
 }
 else {
-    foreach my $volume (@ARGV) {
+    foreach my $volume (sort (keys(%g_parents))) {
         print_paths($volume);
     }
 }
 
-sub trim {
-    my $string = shift;
-    $string =~ s/^\s+//;
-    $string =~ s/\s$//;
-    return $string;
-}
-
 sub read_mounts {
-    open(MOUNTS, "$opt_mounts") || die "Cant open mount point data file: $opt_mounts\n";
+    my $mounts = shift;
+    open(MOUNTS, "$mounts") || die "Cant open mount point data file: $mounts\n";
     while (<MOUNTS>) {
         chomp;
-        my ($vntype, $vtype, $volume, $vid, $fid, $len, $path, $target) = split;
-        next unless $vntype eq 'mountpt';
-        next if $target =~ /\.backup$/; # skip backups
-        next if $target =~ /:/; # skip cross cell
-        my ($rw, $mount) = ($target =~ /(.)(.*)/);
-        $rw = ($rw eq '%' ? 1 : 0);
-
-        unless ($g_parents{$mount}) {
-            $g_parents{$mount} = [];
+        my ($host, $partid, $volume, $vid, $vtype, $mtype, $mcell, $mvol, $path) = split;
+        next if $vtype eq "BK"; # skip backups, for now
+        next if $vtype eq "RO"; # skip ro, for now
+        next if $mcell ne "--"; # skip cross cell
+        my $rw = ($mtype eq '%' ? 1 : 0);
+        unless ($g_parents{$mvol}) {
+            $g_parents{$mvol} = [];
         }
-        push(@{$g_parents{$mount}}, {"path"=>$path, "volume"=>$volume, "rw"=>$rw});
+        push(@{$g_parents{$mvol}}, {"path"=>$path, "volume"=>$volume, "vid"=>$vid, "rw"=>$rw});
     }
     close MOUNTS;
 }
