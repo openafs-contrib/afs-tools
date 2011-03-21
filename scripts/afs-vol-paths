@@ -17,6 +17,16 @@ afs-vol-paths [options] [mounts ...]
 List the absolute paths to volumes from volscan output from
 each fileserver.
 
+Give a list of file names which contain the output from volscan for
+each fileserver.  Use the following options to volscan:
+
+    volscan \
+      -find mounts \
+      -output host partid vname vid vtype mtype mcell mvol path \
+      -noheader
+
+Specify - (dash) to read the volscan data from stdin.
+
 =head1 OPTIONS
 
 =over 8
@@ -70,8 +80,8 @@ if ($opt_volume) {
     print_paths($opt_volume);
 }
 else {
-    foreach my $volume (sort (keys(%g_parents))) {
-        print_paths($volume);
+    foreach my $v (get_volumes()) {
+        print_paths($v);
     }
 }
 
@@ -97,7 +107,7 @@ sub print_paths {
     my $volume = shift;
     my $paths = find_parent_paths([], [$volume], '', 0);
     if (scalar @{$paths} == 0) {
-        warn("no paths found for volume $volume\n");
+        #warn("no paths found for volume $volume\n");
     }
     else {
         #foreach (@{$paths}) {
@@ -138,4 +148,20 @@ sub find_parent_paths {
         }
     }
     return $paths;
+}
+
+# Get list of volumes from vos listvldb.
+sub get_volumes
+{
+    my @volumes = ();
+    open(VOS, "vos listvldb |") or die "could not run vos listvld: $?";
+    while (<VOS>) {
+        next if /^VLDB entries/;
+        next if /^Total entries/;
+        if (/^(\S+)/) {
+            push(@volumes, $1);
+        }
+    }
+    close VOS;
+    return @volumes;
 }
