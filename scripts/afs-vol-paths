@@ -130,13 +130,13 @@ sub find_parent_paths {
             }
         }
         else {
-            warn("not mounted: ". join(" <- ", @vols) ."\n");
+            warn("\nnot mounted: ". join(" <- ", @vols) ."\n");
         }
     }
     else {
         foreach my $p (@{$parents}) {
             if (grep { $p->{volume} eq $_ } @vols) {
-                warn("cycle detected: ". join(", ", @vols) ."\n");
+                warn("\ncycle detected: ". join(", ", @vols) ."\n");
             }
             else {
                 $paths = find_parent_paths(
