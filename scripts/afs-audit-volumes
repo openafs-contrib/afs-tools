@@ -6,8 +6,8 @@ afs-audit-volumes
 
 =head1 SYNOPSIS
 
-afs-audit-volumes --listvldb file [--min-replicas n]
-  [--ignore-domain] [--quiet] listvol.out ...
+afs-audit-volumes [--listvldb listvldb.out] [--min-replicas n]
+  [--ignore-domain] [--quiet|-q] [--commands=file] [listvol.out ...]
 
 
 =head1 OPTIONS
@@ -44,9 +44,23 @@ Print syntax.
 
 =head1 DESCRIPTION
 
-This script scans the output of a previously run 'vos listvld'
-and 'vos listvol' for each server to search for potential
-problems and inconsistences.
+afs-audit-volumes compares the output of 'vos listvldb' and 'vos
+listvol' from each fileserver, and checks for potential problems
+and inconsistences.
+
+By default, afs-audit-volumes will run 'vos listvldb' and from the
+output of 'vos listvldb' determine which fileservers are present
+in the cell. afs-audit-volumes will then run 'vos listvol' for
+each fileserver found from the 'vos listvldb' output. 
+
+afs-audit-volumes compares the information retrieved from the volume
+location database to the information retrieved from each fileserver.
+
+Optionally, you may run 'vos listvldb' and for each fileserver,
+'vos listvol', saving the output of those commands to files, and
+then run afs-audit-volumes by specifying the files as command line
+arguments. 
+
 
 =head2 Server Names
 
@@ -98,7 +112,8 @@ clients may see the wrong read-only data.
 =item Duplicate read-only name
 
 A duplicate read-only volume name was dectected.  If this volume
-is not in the vldb, this error reduces the amount of free disk space.
+is not in the vldb, this error reduces the amount of free disk space
+and the files in the old read-only volume are potentially out of date.
 
 =item Misplaced read-only
 
@@ -162,22 +177,58 @@ vldb for a volume on a fileserver.
 
 =head1 EXAMPLES
 
-Example usage,
+Run afs-audit-volumes without options to retrieve and check the
+volume information:
+
+    $ afs-audit-volumes
+    Found servers: afs01.sinenomine.net, afs03.sinenomine.net, afs04.sinenomine.net
+    Getting volume list from server afs01.sinenomine.net...
+    Getting volume list from server afs03.sinenomine.net...
+    Getting volume list from server afs04.sinenomine.net...
+    Searching for duplicate read-only volume ids...
+    Searching for duplicate read-only volume names...
+    Searching for misplaced read-only volumes...
+    Searching for duplicates in vldb...
+    Checking for sufficient number of replicas...
+    Searching for vldb/fileserver inconsistencies...
+    Searching for fileserver/vldb rw volume inconsistencies...
+    Searching for fileserver/vldb ro volumes inconsistencies...
+    
+    SUMMARY
+    =======
+    Attach errors                     :  0
+    Duplicate read-only id            :  0
+    Duplicate read-only name          :  0
+    Misplaced read-only               :  0
+    VLDB missing read-write           :  0
+    VLDB too many read-write          :  0
+    VLDB duplicate name               :  0
+    VLDB duplicate id                 :  0
+    Not enough replicas               :  0
+    Volume location inconsistencies   :  0
+    Volume type inconsistencies       :  0
+    Volume name inconsistencies       :  0
+    RW Volume missing in vldb         :  0
+    RO Volume missing in vldb         :  0
+    Wrong location in vldb            :  0
+
+
+Gather the volume information before running afs-audit-volumes. This
+allows you to separation the gathering of the volume data from the
+analysis.
+
 
   # Retrieve the current vldb.
   vos listvldb > mycell.listvldb
 
-  # Determine the names of the file servers from the vldb.
-  awk '/server/ {print $2}' mycell.listvldb | sort | uniq > myservers
-
   # Retrieve the file server volume lists.
-  for s in `cat myservers`
+  for s in `vos listaddrs`
   do
-    echo $s; vos listvol $s >$s.listvol
+    vos listvol $s >$s.listvol
   done
 
   # Run the volume audit.
-  afs-audit-volume.pl -v mycell.listvldb *.listvol
+  afs-audit-volume --listvldb mycell.listvldb *.listvol
 
 
 =head1 COPYRIGHT
@@ -199,12 +250,12 @@ my $opt_ignore_domain = 0;
 my $opt_min_replicas = 1;
 my $opt_quiet = 0;
 GetOptions(
-    "listvldb|v=s"  => \$opt_listvldb,
-    "ignore-domain" => \$opt_ignore_domain,
+    "listvldb|v=s"   => \$opt_listvldb,
+    "ignore-domain"  => \$opt_ignore_domain,
     "min-replicas=i" => \$opt_min_replicas,
-    "commands|c=s"  => \$opt_commands,
-    "quiet|q"       => \$opt_quiet,
-    "help|h|?"      => \$opt_help,
+    "commands|c=s"   => \$opt_commands,
+    "quiet|q"        => \$opt_quiet,
+    "help|h|?"       => \$opt_help,
 ) or pod2usage(2);
 pod2usage(1) if $opt_help;
 
@@ -239,8 +290,9 @@ my $summary = {
 
 
 my %g_partition_check = ();
-my $g_servers = [];
 my $g_vldb = [];
+my @g_vl_servers = ();
+my @g_vol_servers = ();
 
 if ($opt_commands) {
     open(CMDS, "> $opt_commands") or die "error: Failed to open $opt_commands for writing. $!\n";
@@ -248,19 +300,32 @@ if ($opt_commands) {
 }
 
 
-## main script
-read_listvol();
+read_listvldb($opt_listvldb);
+unless($opt_quiet) {
+    print "Found servers: ", join(", ", @g_vl_servers), "\n";
+}
+
+if (scalar(@ARGV) == 0) {
+    foreach my $server (@g_vl_servers) {
+        read_listvol('server' => $server);
+    }
+}
+else {
+    foreach my $filename (@ARGV) {
+        read_listvol('filename' => $filename);
+    }
+}
+
+
 audit_duplicate_ro_id();
 audit_duplicate_ro_name();
-if ($opt_listvldb) {
-    read_listvldb($opt_listvldb);
-    audit_errant_ro();
-    audit_vldb_one_readwrite();
-    audit_vldb_under_replicated();
-    audit_vldb_to_partition_consistency();
-    audit_fs_to_vldb_consistency_rw();
-    audit_fs_to_vldb_consistency_ro();
-}
+audit_errant_ro();
+audit_vldb_one_readwrite();
+audit_vldb_under_replicated();
+audit_vldb_to_partition_consistency();
+audit_fs_to_vldb_consistency_rw();
+audit_fs_to_vldb_consistency_ro();
+
 print_summary();
 
 
@@ -270,10 +335,27 @@ print_summary();
 #
 sub read_listvol
 {
-    print "\nReading volume lists...\n" unless $opt_quiet;
+    my %arg = @_;
     my $server = undef;
     my $partition = undef;
-    while (<>) {
+    my @servers;
+
+    if ($arg{'filename'}) {
+        my $filename = $arg{'filename'};
+        print "Reading volume list $filename...\n" unless $opt_quiet;
+        open(LISTVOL, "< $filename") or die "error: Failed to open intput file $filename.\n";
+    }
+    elsif ($arg{'server'}) {
+        my $server = $arg{'server'};
+        print "Getting volume list from server $server...\n" unless $opt_quiet;
+        my $vos = "vos listvol -server $server -noauth";
+        open(LISTVOL, "$vos |") or die "error: Failed to run $vos: $!\n";
+    }
+    else {
+        die "error: read_listvol invalid argument.\n";
+    }
+
+    while (<LISTVOL>) {
         chomp;
         next if /^\s*$/;                  # skip blank lines
         next if /^Total volumes/;         # skip summary lines
@@ -312,7 +394,7 @@ sub read_listvol
 
             # save previous server list
             if (defined $server && ($server->{NAME} ne $server_name)) {
-                push(@{$g_servers}, $server);
+                push(@g_vol_servers, $server);
                 $server = undef;
             }
             unless (defined $server) {
@@ -341,7 +423,7 @@ sub read_listvol
         push(@{$server->{PARTITIONS}}, $partition);
     }
     if (defined $server) {
-        push(@{$g_servers}, $server);
+        push(@g_vol_servers, $server);
     }
 }
 
@@ -352,14 +434,22 @@ sub read_listvldb
 {
     my $filename = shift;
 
-    my $name = undef;
-    my $rw = undef;
-    my $ro = undef;
-    my $bk = undef;
-    my $rc = undef;
-    my $entry = undef;
+    my %servers;
+    my $name;
+    my $rw;
+    my $ro;
+    my $bk;
+    my $rc;
+    my $entry;
 
-    open(LISTVLDB, "< $filename") or die "error: Failed to open $filename\n";
+    if ($filename) {
+        open(LISTVLDB, "< $filename") or die "error: Failed to open intput file $filename: $!\n";
+    }
+    else {
+        my $vos = "vos listvldb -noauth";
+        open(LISTVLDB, "$vos |") or die "error: Failed to run $vos: $!\n";
+    }
+
     while (<LISTVLDB>) {
         chomp;
         next if /^\s*$/;    # skip blank lines
@@ -419,6 +509,7 @@ sub read_listvldb
             if ($opt_ignore_domain) {
                 $server =~ s/\..*$//;
             }
+            $servers{$server} = 1;
 
             if (/-- New release/) {
                 $status = 'new';
@@ -464,6 +555,9 @@ sub read_listvldb
         push(@{$g_vldb}, $entry);
     }
     close LISTVLDB;
+
+    @g_vl_servers = sort(keys(%servers));
+    return;
 }
 
 #
@@ -471,8 +565,8 @@ sub read_listvldb
 #
 sub audit_duplicate_ro_id
 {
-    print "\nSearching for duplicate read-only volume ids...\n" unless $opt_quiet;
-    foreach my $s (@{$g_servers}) {
+    print "Searching for duplicate read-only volume ids...\n" unless $opt_quiet;
+    foreach my $s (@g_vol_servers) {
         my %hash;
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $v (@{$p->{RO}}) {
@@ -496,8 +590,8 @@ sub audit_duplicate_ro_id
 #
 sub audit_duplicate_ro_name
 {
-    print "\nSearching for duplicate read-only volume names...\n" unless $opt_quiet;
-    foreach my $s (@{$g_servers}) {
+    print "Searching for duplicate read-only volume names...\n" unless $opt_quiet;
+    foreach my $s (@g_vol_servers) {
         my %hash;
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $v (@{$p->{RO}}) {
@@ -522,8 +616,8 @@ sub audit_duplicate_ro_name
 #
 sub audit_errant_ro
 {
-    print "\nSearching for misplaced read-only volumes...\n" unless $opt_quiet;
-    foreach my $s (@{$g_servers}) {
+    print "Searching for misplaced read-only volumes...\n" unless $opt_quiet;
+    foreach my $s (@g_vol_servers) {
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $rw (@{$p->{RW}}) {
                 find_errant_ro($s, $rw);
@@ -597,7 +691,7 @@ sub audit_vldb_one_readwrite
     my %hash_name;
     my %hash_id;
 
-    print "\nSearching for duplicates in vldb...\n" unless $opt_quiet;
+    print "Searching for duplicates in vldb...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $rw = $entry->{SITES}->{RW};
         my $name = $entry->{NAME};
@@ -630,7 +724,7 @@ sub audit_vldb_under_replicated
     my %hash_name;
     my %hash_id;
 
-    print "\nChecking for sufficient number of replicas...\n" unless $opt_quiet;
+    print "Checking for sufficient number of replicas...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $ro = $entry->{SITES}->{RO};
         my $name = $entry->{NAME};
@@ -647,7 +741,7 @@ sub audit_vldb_under_replicated
 #
 sub audit_vldb_to_partition_consistency
 {
-    print "\nSearching for vldb/fileserver inconsistencies...\n" unless $opt_quiet;
+    print "Searching for vldb/fileserver inconsistencies...\n" unless $opt_quiet;
     foreach $entry (@{$g_vldb}) {
         my $name = $entry->{NAME};
         my $id = $entry->{ID};
@@ -676,26 +770,26 @@ sub audit_vldb_to_partition_consistency
 
 sub audit_fs_to_vldb_consistency_rw
 {
-    print "\nSearching for fileserver/vldb rw volume inconsistencies...\n" unless $opt_quiet;
+    print "Searching for fileserver/vldb rw volume inconsistencies...\n" unless $opt_quiet;
     my $volumes = {};
     foreach $entry (@{$g_vldb}) {
         my $rwlist = $entry->{SITES}->{RW};
         if (scalar @{$rwlist} == 0) {
-            print "warning: vldb entry is missing rw site, ";
-            print "volume ", $entry->{NAME} if $entry->{NAME};
+            print "warning: vldb entry is missing rw site";
+            print ", volume ", $entry->{NAME} if $entry->{NAME};
             print "\n";
         }
         else {
             if (scalar @{$rwlist} > 1) {
-                print "warning: vldb entry has multiple rw sites, ";
-                print "volume ", $entry->{NAME} if $entry->{NAME};
+                print "warning: vldb entry has multiple rw sites";
+                print ", volume ", $entry->{NAME} if $entry->{NAME};
                 print "\n";
             }
             $rw = $rwlist->[0];
             $id = $rw->[ID];
             if (defined $volumes->{$id}) {
-                print "warning: duplicate rw id in vldb ";
-                print "volume ", $entry->{NAME} if $entry->{NAME};
+                print "warning: duplicate rw id in vldb";
+                print ", volume ", $entry->{NAME} if $entry->{NAME};
                 print "\n";
             }
             else {
@@ -704,7 +798,7 @@ sub audit_fs_to_vldb_consistency_rw
         }
     }
 
-    foreach my $s (@{$g_servers}) {
+    foreach my $s (@g_vol_servers) {
         my %hash;
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $rw (@{$p->{RW}}) {
@@ -735,7 +829,7 @@ sub audit_fs_to_vldb_consistency_rw
 
 sub audit_fs_to_vldb_consistency_ro
 {
-    print "\nSearching for fileserver/vldb ro volumes inconsistencies...\n" unless $opt_quiet;
+    print "Searching for fileserver/vldb ro volumes inconsistencies...\n" unless $opt_quiet;
     my $volumes = {};
     foreach $entry (@{$g_vldb}) {
         my $rolist = $entry->{SITES}->{RO};
@@ -753,7 +847,7 @@ sub audit_fs_to_vldb_consistency_ro
         }
     }
 
-    foreach my $s (@{$g_servers}) {
+    foreach my $s (@g_vol_servers) {
         my %hash;
         foreach my $p (@{$s->{PARTITIONS}}) {
             foreach my $ro (@{$p->{RO}}) {
@@ -796,7 +890,7 @@ sub find_partition
     my $server = shift;
     my $partition = shift;
 
-    foreach my $s (@{$g_servers}) {
+    foreach my $s (@g_vol_servers) {
         if ($s->{NAME} eq $server) {
             foreach my $p (@{$s->{PARTITIONS}}) {
                 if ($p->{NAME} eq $partition) {
@@ -808,28 +902,41 @@ sub find_partition
     return undef;
 }
 
+#
+# Count total number of errors.
+#
+sub summary_total
+{
+    my $total = 0;
+    foreach my $s (keys(%{$summary})) {
+        $total += $summary->{$s};
+    }
+    return $total;
+}
 
 #
 # Print a summary of the errors found.
 #
 sub print_summary
 {
-    print "\nSUMMARY\n";
-    print "========\n";
-    print "Attach errors                     :  $summary->{AUDIT_ATTACH_ERROR}\n";
-    print "Duplicate read-only id            :  $summary->{AUDIT_DUP_RO_ID}\n";
-    print "Duplicate read-only name          :  $summary->{AUDIT_DUP_RO_NAME}\n";
-    print "Misplaced read-only               :  $summary->{AUDIT_ERRANT_RO}\n";
-    print "VLDB missing read-write           :  $summary->{AUDIT_VLDB_MISSING_RW}\n";
-    print "VLDB too many read-write          :  $summary->{AUDIT_VLDB_TOO_MANY_RW}\n";
-    print "VLDB duplicate name               :  $summary->{AUDIT_VLDB_DUP_NAME}\n";
-    print "VLDB duplicate id                 :  $summary->{AUDIT_VLDB_DUP_ID}\n";
-    print "Not enough replicas               :  $summary->{AUDIT_MIN_REPLICAS}\n";
-    print "Volume location inconsistencies   :  $summary->{AUDIT_VOL_LOCATION}\n";
-    print "Volume type inconsistencies       :  $summary->{AUDIT_VOL_TYPE}\n";
-    print "Volume name inconsistencies       :  $summary->{AUDIT_VOL_NAME}\n";
-    print "RW Volume missing in vldb         :  $summary->{AUDIT_RW_NOT_IN_VLDB}\n";
-    print "RO Volume missing in vldb         :  $summary->{AUDIT_RO_NOT_IN_VLDB}\n";
-    print "Wrong location in vldb            :  $summary->{AUDIT_WRONG_LOCATION_IN_VLDB}\n";
+    print "\n" unless $opt_quiet;
+    print "Summary\n" unless $opt_quiet;
+    print "=======\n" unless $opt_quiet;
+    print "Attach errors                   =  $summary->{AUDIT_ATTACH_ERROR}\n";
+    print "Duplicate read-only id          =  $summary->{AUDIT_DUP_RO_ID}\n";
+    print "Duplicate read-only name        =  $summary->{AUDIT_DUP_RO_NAME}\n";
+    print "Misplaced read-only             =  $summary->{AUDIT_ERRANT_RO}\n";
+    print "VLDB missing read-write         =  $summary->{AUDIT_VLDB_MISSING_RW}\n";
+    print "VLDB too many read-write        =  $summary->{AUDIT_VLDB_TOO_MANY_RW}\n";
+    print "VLDB duplicate name             =  $summary->{AUDIT_VLDB_DUP_NAME}\n";
+    print "VLDB duplicate id               =  $summary->{AUDIT_VLDB_DUP_ID}\n";
+    print "Not enough replicas             =  $summary->{AUDIT_MIN_REPLICAS}\n";
+    print "Volume location inconsistencies =  $summary->{AUDIT_VOL_LOCATION}\n";
+    print "Volume type inconsistencies     =  $summary->{AUDIT_VOL_TYPE}\n";
+    print "Volume name inconsistencies     =  $summary->{AUDIT_VOL_NAME}\n";
+    print "RW Volume missing in vldb       =  $summary->{AUDIT_RW_NOT_IN_VLDB}\n";
+    print "RO Volume missing in vldb       =  $summary->{AUDIT_RO_NOT_IN_VLDB}\n";
+    print "Wrong location in vldb          =  $summary->{AUDIT_WRONG_LOCATION_IN_VLDB}\n";
+    print "TOTAL                           =  ". summary_total() ."\n";
 }
 
