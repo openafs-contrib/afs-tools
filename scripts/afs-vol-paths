@@ -67,7 +67,10 @@ use Pod::Usage;
 use Getopt::Long;
 use Data::Dumper;
 
-my %g_parents;
+my %g_parents;  # volume to parent volume hash; where parent is a rw volume
+                #   containing at least one mount point to the child volume
+my %g_in_ro;    # volume to parent hash for ro volumes not seen in g_parents.
+                #   this is used to warn for mounts in unreleased ro volumes.
 
 my $opt_volume = "";
 my $opt_rw = 0;
@@ -102,6 +105,9 @@ sub main {
         read_mounts("-");
     }
 
+    check_unreleased_mounts();
+die "testing";
+
     if ($opt_volume) {
         print_paths($opt_volume);
     }
@@ -127,12 +133,13 @@ sub read_mounts {
         my $rw = ($mtype eq '%' ? 1 : 0);
 
         next if $vtype eq "BK"; # skip backups
-        next if $vtype eq "RO"; # skip read-only
+
         if ($mcell ne "--") {
             if ($opt_cell && $mcell ne $opt_cell) {
                 next; # skip cross cell
             }
         }
+
         if ($volume eq $mvol) {
             if ($opt_debug) {
                 warn("Skipping volume $volume mounted to self on path $path\n");
@@ -140,12 +147,43 @@ sub read_mounts {
             next;  # skip self-parent
         }
 
-        unless ($g_parents{$mvol}) {
-            $g_parents{$mvol} = [];
+        if ($vtype eq "RW") {
+            unless ($g_parents{$mvol}) {
+                $g_parents{$mvol} = [];
+            }
+            push(@{$g_parents{$mvol}}, {"path"=>$path, "volume"=>$volume, "vid"=>$vid, "rw"=>$rw});
+            next;
         }
-        push(@{$g_parents{$mvol}}, {"path"=>$path, "volume"=>$volume, "vid"=>$vid, "rw"=>$rw});
+
+        if ($vtype eq "RO") {
+            # If this mount point has not been seen in a read/write volume, it may only
+            # be present in an unreleased read-only volume. Save it here and reconcile
+            # after reading all of the files.
+            unless ($g_parents{$mvol}) {
+                unless ($g_in_ro{$mvol}) {
+                    push(@{$g_in_ro{$mvol}}, {"path"=>$path, "volume"=>$volume, "vid"=>$vid, "rw"=>$rw});
+                }
+            }
+            next;
+        }
     }
     close MOUNTS;
+}
+
+#----------------------------------------------------------------
+# Find any mount points detected in read-only volumes which
+# are not present in the read/write space.
+#
+sub check_unreleased_mounts
+{
+    foreach my $mvol (keys %{%g_in_ro}) {
+        my $parents = $g_in_ro{$mvol};
+        unless ($g_parents{$mvol}) {
+            foreach my $p (@{$parents}) {
+                warn("Unreleased $p->{volume} ($p->{vid}) has only mount point to $mvol\n");
+            }
+        }
+    }
 }
 
 #----------------------------------------------------------------
