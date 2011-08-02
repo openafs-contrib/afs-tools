@@ -106,7 +106,6 @@ sub main {
     }
 
     check_unreleased_mounts();
-die "testing";
 
     if ($opt_volume) {
         print_paths($opt_volume);
