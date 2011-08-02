@@ -14,7 +14,7 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
-# Originally written by Michael Meffie <mmeffie@sinenomine.net>
+# Michael Meffie <mmeffie@sinenomine.net>
 #
 
 =head1 NAME
@@ -23,7 +23,7 @@ afs-get-versions - report afs server versions
 
 =head1 SYNOPSIS
 
-B<afs-get-versions> [B<--cell> <I<cellname>>]
+B<afs-get-versions> [B<--cell> <I<cellname>>] [B<--showbuild>]
 
 =head1 DESCRIPTION
 
@@ -35,7 +35,7 @@ information.
 If a server listed by B<vos listaddrs> cannot be reached, the following is
 reported,
 
-    Warning: Could not find version for fileserver <address>
+    Unable to contact <hostname> (<address>:<port>)
 
 Verify the server listed by <address> is still an active file server, and if
 not, remove the obsolete server entry. To remove obsolete server entries, use
@@ -50,14 +50,11 @@ the B<vos changeaddr> command with the B<-remove> argument.
 Names the cell in which to run the command. Uses the local
 cell if not speficied.
 
+=item B<--showbuild>
+
+Show the build date returned by rxdebug.
+
 =back
-
-=head1 EXAMPLES
-
-    $ afs-get-versions
-    afs02.sinenomine.net (72.73.25.18) OpenAFS 1.4.7 built  2009-07-18
-    afs04.sinenomine.net (72.73.30.76) OpenAFS 1.4.12 built  2010-03-09
-    afs01.sinenomine.net (74.121.192.45) OpenAFS 1.4.12 built  2010-03-09
 
 =head1 COPYRIGHT
 
@@ -68,42 +65,149 @@ All rights reserved.
 
 use Getopt::Long;
 use Pod::Usage;
+use Socket;
+use Data::Dumper;
 
-my $opt_cell = undef;
+my %service_port = (
+    'fileserver' => 7000,
+    'callback' => 7001,
+    'ptserver' => 7002,
+    'vlserver' => 7003,
+    'kaserver' => 7004,
+    'volserver' => 7005,
+    'errors' => 7006,
+    'bosserver' => 7007,
+    'update' => 7008,
+    'rmtsys' => 7009,
+);
+
+my $opt_cell = "";
 my $opt_help = 0;
+my $opt_show_build_date = 0;
 GetOptions(
     "cell|c=s"  => \$opt_cell,
+    "showbuild|b" => \$opt_show_build_date,
     "help|h|?"  => \$opt_help,
 ) or pod2usage(2);
 pod2usage(1) if $opt_help;
 
-my $vopts = "-noauth ". ($opt_cell ? "-cell $opt_cell" : "");
+my $cell;
 
-open(VOS, "vos listaddrs $vopts |") or die "Failed to run vos listaddrs: $!";
-while(<VOS>) {
-    chomp;
-    my $addresses = $_;
-    foreach my $address (split /\s+/) {
-        open(RXDEBUG, "rxdebug $address 7000 -version |") or die "Failed to run rxdebug: $!";
-        my ($ip, $version_string);
-        while (<RXDEBUG>) {
-            chomp;
-            if (/^Trying (.*) \(port 7000\)/) {
-                $ip = $1;
-                next;
-            }
-            if (/^AFS version:  (.*)/) {
-                $version_string = $1;
-                $ip = "<unknown>" unless $ip;
-                print("$address ($ip) $version_string\n");
-                last;
-            }
-        }
-        close RXDEBUG;
-        unless ($version_string) {
-            warn("Warning: Could not find version for fileserver $address ".
-                 ($ip ? "($ip)\n" : "\n"));
+if ($opt_cell) {
+    $cell = $opt_cell;
+}
+else {
+    $cell = find_cell();
+}
+
+my @db = find_db_hosts($cell);
+my @fs = find_fs_hosts($cell);
+
+foreach my $h (@db) {
+    report_version($h, 'ptserver');
+    report_version($h, 'vlserver');
+}
+foreach my $h (@fs) {
+    report_version($h, 'fileserver');
+    report_version($h, 'volserver');
+}
+
+#----------------------------------------------------------------
+# Find the local cellname.
+#
+sub find_cell
+{
+    my $cell = undef;
+    my $fs = "fs wscell";
+
+    open(FS, "$fs |") or die "Failed to run $fs: $!";
+    while (<FS>) {
+        if (/This workstation belongs to cell '([^']*)'/) {
+           $cell = $1;
+           last;
         }
     }
+    close FS;
+    return $cell;
 }
-close VOS;
+
+#----------------------------------------------------------------
+# Find addresses of db hosts in the cell.
+#
+sub find_db_hosts
+{
+    my $cell = shift;
+    my %host;
+
+    my $fs = "fs listcells -n";
+    if ($cell) {
+        open(FS, "$fs |") or die "Failed to run $fs: $!";
+        while (<FS>) {
+            chomp;
+            if (/Cell $cell on hosts (.*)\./) {
+                foreach my $address (split(/\s+/, $1)) {
+                    unless ($host{$address}) {
+                        $host{$address} = 1;
+                    }
+                }
+            }
+        }
+        close FS;
+    }
+
+    return sort(keys(%host));
+}
+
+#----------------------------------------------------------------
+# Find addresses of fileserver hosts in the cell.
+#
+sub find_fs_hosts
+{
+    my $cell = shift;
+    my %host;
+
+    my $vos = "vos listaddrs -noresolv -noauth";
+    if ($cell) {
+        $vos .= " -cell $cell";
+    }
+    open(VOS, "$vos |") or die "Failed to run $vos: $!";
+    while(<VOS>) {
+        chomp;
+        my @addresses = split(/\s+/);
+        my $primary = $addresses[0];
+        unless ($host{$primary}) {
+            $host{$primary} = 1;
+        }
+    }
+    close VOS;
+
+    return sort(keys(%host));
+}
+
+#----------------------------------------------------------------
+# Run rxdebug to print the version string.
+#
+sub report_version
+{
+    my ($ip, $service) = @_;
+    my $hostname = gethostbyaddr(inet_aton($ip), AF_INET);
+    my $version;
+    my $port = $service_port{$service};
+
+    my $rxdebug = "rxdebug $ip $port -version";
+    open(RXDEBUG, "$rxdebug |") or die "Failed to run $rxdebug: $!";
+    while (<RXDEBUG>) {
+        chomp;
+        if (/^AFS version:  (.*)/) {
+            $version = $1;
+            #printf("%s (%s:%d) %s %s\n", $hostname, $ip, $port, $service, $version);
+            printf("%s %s %s\n", $hostname, $service, $version);
+            last;
+        }
+    }
+    close RXDEBUG;
+    unless ($version) {
+        printf STDERR "Unable to contact %s (%s:%d)\n", $hostname, $ip, $port;
+    }
+}
+
