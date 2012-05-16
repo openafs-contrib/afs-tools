@@ -1,0 +1,269 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+use Getopt::Long;
+
+my $cacheitems;
+my $v = 0;
+my $stat = 0;
+my @fids = ();
+
+GetOptions('cacheitems:s' => \$cacheitems,
+           'verbose' => \$v,
+           'stat' => \$stat) or die;
+
+@fids = @ARGV;
+
+if (@fids < 1) {
+	print STDERR "Example usage:\ncachestat --verbose --stat --cacheitems -- 536870942.34.18036 536870942.36.180365\n";
+	die("You must specify at least one fid");
+}
+
+my %fidmap;
+
+for my $fid (@fids) {
+	my @elements = split /[.]/, $fid;
+	die("invalid fid $fid") if (@elements != 3 or grep(/[^0-9]/, @elements));
+
+	if ($v) {
+		print "Looking for fid $fid\n";
+	}
+
+	$fidmap{$fid} = {
+		'cachedsize' => 0,
+		'chunks' => 0,
+		'oldchunks' => 0,
+		'oldbytes' => 0,
+		'oldsize' => 0,
+		'dv' => undef,
+		'totalsize' => 0,
+		'callback' => 0,
+		'expires' => 0,
+		'statfound' => 0,
+		'states' => undef,
+	};
+}
+
+if (defined($cacheitems) and not $cacheitems) {
+	$cacheitems = "/usr/vice/cache/CacheItems";
+}
+
+if ($cacheitems) {
+	my $buf;
+	my $FCACHE_SIZE;
+	my $code;
+	my $v16 = 0;
+	my $v14 = 0;
+
+	open(CACHEITEMS, "<", $cacheitems) or die ("Cannot open $cacheitems: $!");
+
+	read(CACHEITEMS, $buf, 8) == 8 or die("bad read header: $!");
+	my ($magic, $version) = unpack("Ll", $buf);
+	my $dataSize = -1;
+	my ($firstCSize, $otherCSize);
+
+	# AFS_FHMAGIC
+	if ($magic != 0x7635abaf) {
+		die("Bad CacheItems magic: $magic");
+	}
+	if ($version == 4) {
+		$v16 = 1;
+		if ($v) { print "found 1.6+ CacheItems format\n"; }
+
+		$FCACHE_SIZE = 80;
+		read(CACHEITEMS, $buf, 12) == 12 or die("bad read header: $!");
+		($dataSize, $firstCSize, $otherCSize) = unpack("lll", $buf);
+
+	} elsif ($version == 3 or $version == 2) {
+		$v14 = 1;
+		if ($v) { print "found 1.4 CacheItems format\n"; }
+
+		$FCACHE_SIZE = 48;
+		read(CACHEITEMS, $buf, 8) == 8 or die("bad read header: $!");
+		($firstCSize, $otherCSize) = unpack("ll", $buf);
+
+	} else {
+		die("Bad CacheItems version: $version");
+	}
+
+	if ($v) {
+		printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n".
+		       "\tdataSize: %d\n".
+		       "\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+		       $magic, $version, $dataSize, $firstCSize, $otherCSize;
+	}
+
+	while (($code = read(CACHEITEMS, $buf, $FCACHE_SIZE)) > 0) {
+		my ($cell, $vol, $vnode, $uniq, $modtime,
+		    $versionNo_hi, $versionNo_lo, $chunk, $inode_hi, $inode_lo,
+		    $chunkBytes, $states) =
+			($v16 ? unpack("LLLLLLLLLLx[32]LC", $buf)
+			      : unpack("LLLLLLLLLLLC", $buf));
+
+		my $fid = "$vol.$vnode.$uniq";
+		if (exists $fidmap{$fid}) {
+			my $fidentry = $fidmap{$fid};
+			my $dv = ($versionNo_hi << 32) | $versionNo_lo;
+
+			if ($v) {
+				print "found fid $fid chunk $chunk dv $dv bytes $chunkBytes\n";
+			}
+
+			if (not defined($fidentry->{dv})) {
+				$fidentry->{dv} = $dv;
+			}
+			if ($dv < $fidentry->{dv}) {
+				$fidentry->{oldchunks}++;
+				$fidentry->{oldbytes} += $chunkBytes;
+			}
+			if ($dv > $fidentry->{dv}) {
+				$fidentry->{oldchunks} += $fidentry->{chunks};
+				$fidentry->{oldbytes} += $fidentry->{cachedsize};
+				$fidentry->{chunks} = 0;
+				$fidentry->{cachedsize} = 0;
+				$fidentry->{dv} = $dv;
+			}
+			if ($dv == $fidentry->{dv}) {
+				$fidentry->{cachedsize} += $chunkBytes;
+				$fidentry->{chunks}++;
+			}
+		}
+	}
+	close(CACHEITEMS);
+}
+
+if ($stat) {
+	open(CMDEBUG, "-|", "cmdebug localhost -long") or die("Cannot run cmdebug: $!");
+
+	my $skip = 0;
+	my $fid;
+	my $fidentry;
+
+	while (<CMDEBUG>) {
+		chomp;
+		if ($skip > 0) { $skip--; next; }
+		if (m/^Lock /) { next; }
+
+		if (m/^[*][*] Cache entry @ 0x[0-9a-f]+ for \d+[.](-?\d+[.]-?\d+[.]-?\d+) .*$/) {
+			$fid = $1;
+			if (not exists $fidmap{$fid}) {
+				$skip = 5;
+				next;
+			}
+			$fidentry = $fidmap{$fid};
+			$fidentry->{statfound} = 1;
+			next;
+		}
+
+		if (m/^\s+(\d+) bytes  DV\s+(\d+)  refcnt.*/) {
+			my $bytes = $1;
+			my $dv = $2;
+
+			if ($v) {
+				print "found stat fid $fid dv $dv\n";
+			}
+
+			if (not defined($fidentry->{dv})) {
+				$fidentry->{dv} = $dv;
+			}
+			if ($dv < $fidentry->{dv}) {
+				$fidentry->{oldstat}++;
+				$skip = 4;
+				next;
+			}
+			if ($dv > $fidentry->{dv}) {
+				$fidentry->{oldchunks} += $fidentry->{chunks};
+				$fidentry->{oldbytes} += $fidentry->{cachedsize};
+				$fidentry->{chunks} = 0;
+				$fidentry->{cachedsize} = 0;
+				$fidentry->{dv} = $dv;
+			}
+			if ($dv == $fidentry->{dv}) {
+				$fidentry->{totalsize} = $bytes;
+			}
+			next;
+		}
+		if (m/^\s+callback\s([0-9a-f]+)\s+expires\s(\d+)\s*$/) {
+			$fidentry->{callback} = $1;
+			$fidentry->{expires} = $2;
+			next;
+		}
+		if (m/^\s+\d+ opens/) {
+			$skip = 1;
+			next;
+		}
+		if (m/^\s+states [(]0x(\d+)[)].*/) {
+			$fidentry->{states} = $1;
+			$fidentry = undef;
+			next;
+		}
+		die("Unmatched cmdebug line: $_");
+	}
+
+	close(CMDEBUG);
+}
+
+my $missingstat = 0;
+my $missingdcache = 0;
+my $missingbytes = 0;
+
+for my $fid (keys %fidmap) {
+	my $fidentry = $fidmap{$fid};
+	my $expires;
+	my $expired = 0;
+
+	$expires = $fidentry->{expires};
+
+	if ($expires and $expires < time) {
+		$expired = 1;
+	}
+
+	if (not $fidentry->{statfound}) {
+		$missingstat++;
+	} elsif (not $fidentry->{callback}) {
+		$missingstat++;
+	} elsif ($expired) {
+		$missingstat++;
+	} elsif (defined($fidentry->{states})) {
+		my $states = hex($fidentry->{states});
+		if (($states & 0x1) == 0) {
+			$missingstat++;
+		}
+	}
+
+	if ($fidentry->{totalsize} and $fidentry->{cachedsize} != $fidentry->{totalsize}) {
+		$missingbytes += $fidentry->{totalsize} - $fidentry->{cachedsize};
+		$missingdcache++;
+	}
+
+	if ($expires) {
+		$expires = scalar localtime $expires;
+		if ($expired) {
+			$expires .= " (EXPIRED)";
+		}
+	}
+
+	my $dv = "unknown";
+	if (defined($fidentry->{dv})) {
+		$dv = $fidentry->{dv};
+	}
+
+	if ($v) {
+		printf "fid %s {\n\tcached bytes: %d\n\ttotal bytes:  %d\n\t".
+		       "cached chunks: %d\n\told cached chunks: %d\n\t".
+		       "old cached bytes: %d\n\t".
+		       "dv: %s\n\tcallback: %s\n\texpires: %s\n\t".
+		       "states: %s\n}\n",
+		       $fid, $fidentry->{cachedsize}, $fidentry->{totalsize},
+		       $fidentry->{chunks}, $fidentry->{oldchunks},
+		       $fidentry->{oldbytes},
+		       $dv, $fidentry->{callback}, $expires,
+		       (defined($fidentry->{states}) ? "0x".$fidentry->{states} : 'undef');
+	}
+}
+
+print "\n";
+print "Files missing an up-to-date stat cache: $missingstat\n";
+print "Files missing at least one chunk of data: $missingdcache\n";
+print "Total data bytes missing from cache: $missingbytes\n";
