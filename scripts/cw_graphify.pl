@@ -375,8 +375,9 @@ if ($types{'impulse'}) {
 
 print PLT <<EOS;
 set ylabel 'Calls Waiting'
-set term png size $width,512
+set term png size $width,700
 set grid ytics
+set bmargin 6
 
 set output '$graphfile'
 
