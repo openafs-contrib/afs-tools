@@ -337,7 +337,17 @@ while (<IN>) {
 
 close(IN);
 
-my @machlist = keys %machines;
+my @machlist = grep {
+	my $ret = 0;
+	for my $time (@rows) {
+		my $calls = $machines{$_}->{$time};
+		if (defined($calls) and $calls > 0) {
+			$ret = 1;
+			last;
+		}
+	}
+	$ret;
+} (keys %machines);
 
 print DAT "Time";
 for my $machine (@machlist) {
