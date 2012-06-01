@@ -349,6 +349,17 @@ my @machlist = grep {
 	$ret;
 } (keys %machines);
 
+if (scalar(@machlist) < 1) {
+	print <<EOS;
+
+The provided data shows 0 calls waiting for all machines in the given data
+set. Since there is nothing to graph, skipping generation of gnuplot plot
+file and data file.
+
+EOS
+	exit(1);
+}
+
 print DAT "Time";
 for my $machine (@machlist) {
 	print DAT "\t$machine";
