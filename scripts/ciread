@@ -1,0 +1,35 @@
+#!/usr/bin/perl -w
+# for reading CacheItems data
+use strict;
+
+my $FHEADER_SIZE = 16;
+my $FCACHE_SIZE = 48;
+my $buf;
+
+open(CACHEITEMS, "<", $ARGV[0]) or die("Cannot open $ARGV[0]: $!");
+
+read(CACHEITEMS, $buf, $FHEADER_SIZE);
+my ($magic, $version, $firstCSize, $otherCSize) =
+	unpack("Llll", $buf);
+
+printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+       $magic, $version, $firstCSize, $otherCSize;
+
+if (not defined($ARGV[1])) {
+	exit(0);
+}
+
+my $off = $FHEADER_SIZE + $FCACHE_SIZE * $ARGV[1];
+
+print "offset $off\n";
+
+my $code;
+$code = seek(CACHEITEMS, $off, 0);
+$code = read(CACHEITEMS, $buf, $FCACHE_SIZE);
+my ($cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo, $chunk, $inode, $chunkBytes, $states) =
+    unpack("LLLLLLLLQLC", $buf);
+
+printf "fcache {\n\tfid: %u.%u.%u.%u\n\tmodtime: %u\n\tversionNo: %u, %u" .
+       "\n\tchunk: %u\n\tinode: %lu\n\tchunkBytes: %u\n\tstates: 0x%x\n}\n",
+       $cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo, $chunk, $inode, $chunkBytes,
+       $states;
