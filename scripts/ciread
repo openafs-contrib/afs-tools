@@ -1,35 +1,150 @@
 #!/usr/bin/perl -w
-# for reading CacheItems data
+# Copyright (c) 2012, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+=head1 NAME
+
+ciread - display AFS CacheItems data
+
+=head1 SYNOPSIS
+
+B<ciread> I<file> [I<index>]
+
+=head1 DESCRIPTION
+
+B<ciread> is a debugging aid for displaying the AFS cache manager CacheItems
+file data. The CacheItems file is an internal file which stores information
+about the AFS cache hunk files.
+
+B<ciread> displays the CacheItems file header, the number of fcache records,
+and if I<index> is given, the contents of the fcache record for that index
+value.
+
+=head1 OPTIONS
+
+=over 8
+
+=item I<file>
+
+The full name and path to the CacheItems file to be read.
+
+=item I<index>
+
+The dcache index to be read. This is used to calculate the offset in the
+CacheItems file to the fcache struct to be read. If I<index> is not given,
+then just the CacheItems header and the number of records are displayed.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2012, Sine Nomine Associates
+
+=cut
+
 use strict;
 
-my $FHEADER_SIZE = 16;
-my $FCACHE_SIZE = 48;
 my $buf;
+my $fheader_size;    # version dependent
+my ($magic, $version, $dataSize, $firstCSize, $otherCSize);
 
-open(CACHEITEMS, "<", $ARGV[0]) or die("Cannot open $ARGV[0]: $!");
+my $cacheitems = shift;
+my $index      = shift;
 
-read(CACHEITEMS, $buf, $FHEADER_SIZE);
-my ($magic, $version, $firstCSize, $otherCSize) =
-	unpack("Llll", $buf);
-
-printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n\tfirstCSize: %u\n\totherCSize: %u\n}\n",
-       $magic, $version, $firstCSize, $otherCSize;
-
-if (not defined($ARGV[1])) {
-	exit(0);
+unless (defined($cacheitems)) {
+    die "usage: ciread <file> [<index>]\n";
+}
+if (defined($index)) {
+    unless ($index =~ /^\d+$/) {
+        die "index must be numeric.\n";
+    }
 }
 
-my $off = $FHEADER_SIZE + $FCACHE_SIZE * $ARGV[1];
+open(CACHEITEMS, "<", $cacheitems) or die("Cannot open $cacheitems: $!");
 
-print "offset $off\n";
+read(CACHEITEMS, $buf, 8) or die("Unable to read header: $!");
+($magic, $version) = unpack("Ll", $buf);
 
-my $code;
-$code = seek(CACHEITEMS, $off, 0);
-$code = read(CACHEITEMS, $buf, $FCACHE_SIZE);
-my ($cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo, $chunk, $inode, $chunkBytes, $states) =
-    unpack("LLLLLLLLQLC", $buf);
+if ($magic != 0x7635abaf) {
+    die("Bad CacheItems magic: $magic");
+}
 
-printf "fcache {\n\tfid: %u.%u.%u.%u\n\tmodtime: %u\n\tversionNo: %u, %u" .
-       "\n\tchunk: %u\n\tinode: %lu\n\tchunkBytes: %u\n\tstates: 0x%x\n}\n",
-       $cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo, $chunk, $inode, $chunkBytes,
-       $states;
+if ($version == 4) {    # v1.6.x
+    $fheader_size = 20;
+    read(CACHEITEMS, $buf, 12) == 12 or die("bad read header: $!");
+    ($dataSize, $firstCSize, $otherCSize) = unpack("lll", $buf);
+    printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n"
+      . "\tdataSize: %u\n\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+      $magic, $version, $dataSize, $firstCSize, $otherCSize;
+
+}
+elsif ($version == 3 or $version == 2) {    # v1.4.x or earlier
+    $fheader_size = 16;
+    $dataSize     = 48;
+    read(CACHEITEMS, $buf, 8) == 8 or die("bad read header: $!");
+    ($firstCSize, $otherCSize) = unpack("ll", $buf);
+    printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n"
+      . "\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+      $magic, $version, $firstCSize, $otherCSize;
+}
+else {
+    die("Bad CacheItems version: $version");
+}
+
+my $filesize = (stat($cacheitems))[7];
+my $nrecords = ($filesize - $fheader_size) / $dataSize;
+printf "filesize %u\nrecords %u\n", $filesize, $nrecords;
+
+if (defined($index)) {
+
+    my $off = $fheader_size + $dataSize * $index;
+    print "offset $off\n";
+
+    my $code;
+    $code = seek(CACHEITEMS, $off, 0)
+      || die "Unable to seek to offset $off: $!";
+    $code = read(CACHEITEMS, $buf, $dataSize)
+      || die "Unable to read at offset $off: $!";
+
+    # The inode size and structure is platform dependent.
+    my $inode_template;
+    if ($dataSize == 48) {
+        $inode_template = "Q";
+    }
+    elsif ($dataSize > 40) {
+        $inode_template = sprintf("H%d", ($dataSize - 40) * 2);
+    }
+    else {
+        die "Unexpected dataSize $dataSize";
+    }
+    my $template = "LLLLLLLL" . $inode_template . "LC";
+
+    my (
+        $cell,    $vol,          $vnode,        $uniq,
+        $modtime, $versionNo_hi, $versionNo_lo, $chunk,
+        $inode,   $chunkBytes,   $states
+    ) = unpack($template, $buf);
+
+    if ($inode_template eq "Q") {
+        $inode = sprintf("%lu", $inode);
+    }
+
+    printf "fcache {\n\tfid: %u.%u.%u.%u\n\tmodtime: %u\n\tversionNo: %u, %u\n"
+      . "\tchunk: %u\n\tinode: %s\n\tchunkBytes: %u\n\tstates: 0x%x\n}\n",
+      $cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo,
+      $chunk,
+      $inode, $chunkBytes, $states;
+
+}

@@ -1,37 +1,135 @@
 #!/usr/bin/perl -w
-# search through CacheItems
+# Copyright (c) 2012, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+=head1 NAME
+
+cisearch - search the AFS CacheItems for records matching a FID
+
+=head1 SYNOPSIS
+
+B<cisearch> I<file> [I<cell>.I<volume>.I<vnode>.I<uniq>]
+
+=head1 DESCRIPTION
+
+B<cisearch> is a debugging aid for displaying the AFS cache manager CacheItems
+file data. The CacheItems file is an internal file which stores information
+about the AFS cache hunk files.
+
+B<cisearch> displays the index of records in the CacheItems file which match a
+given AFS FID. If no FID is given, the indices and FIDs are listed for all records
+which have a non-zero FID.
+
+=head1 OPTIONS
+
+=over 8
+
+=item I<file>
+
+The full name and path to the CacheItems file to be read.
+
+=item I<cell>.I<volume>.I<vnode>.I<uniq>
+
+The FID to search in the CacheItems file. Matching dcache indices are displayed
+if found. If the FID is not given, the indices and FIDs for all records which
+have a non-zero FID are displayed.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2012, Sine Nomine Associates
+
+=cut
+
 use strict;
 
-my $FHEADER_SIZE = 16;
-my $FCACHE_SIZE = 80; #48;
+my $usage = "usage: cisearch <file> [<cell>.<volume>.<vnode>.<uniq>]";
+
 my $buf;
+my $fheader_size;    # version dependent
+my ($magic, $version, $dataSize, $firstCSize, $otherCSize);
 
-open(CACHEITEMS, "<", $ARGV[0]) or die("Cannot open $ARGV[0]: $!");
+my $cacheitems = shift;
+my $sfid       = shift;
+my ($scell, $svol, $svnode, $suniq);
 
-read(CACHEITEMS, $buf, $FHEADER_SIZE);
-my ($magic, $version, $firstCSize, $otherCSize) =
-	unpack("Llll", $buf);
-
-printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n\tfirstCSize: %u\n\totherCSize: %u\n}\n",
-       $magic, $version, $firstCSize, $otherCSize;
-
-if (not defined($ARGV[1])) {
-	exit(0);
+unless (defined($cacheitems)) {
+    die "$usage\n";
 }
 
-my ($scell, $svol, $svnode, $suniq) = split /[.]/, "$ARGV[1]";
+open(CACHEITEMS, "<", $cacheitems) or die("Cannot open $cacheitems: $!");
 
-print "search for cell $scell vol $svol vnode $svnode uniq $suniq\n";
+read(CACHEITEMS, $buf, 8) or die("Unable to read header: $!");
+($magic, $version) = unpack("Ll", $buf);
+
+if ($magic != 0x7635abaf) {
+    die("Bad CacheItems magic: $magic");
+}
+
+if ($version == 4) {    # v1.6.x
+    $fheader_size = 20;
+    read(CACHEITEMS, $buf, 12) == 12 or die("bad read header: $!");
+    ($dataSize, $firstCSize, $otherCSize) = unpack("lll", $buf);
+    printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n"
+      . "\tdataSize: %u\n\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+      $magic, $version, $dataSize, $firstCSize, $otherCSize;
+
+}
+elsif ($version == 3 or $version == 2) {    # v1.4.x or earlier
+    $fheader_size = 16;
+    $dataSize     = 48;
+    read(CACHEITEMS, $buf, 8) == 8 or die("bad read header: $!");
+    ($firstCSize, $otherCSize) = unpack("ll", $buf);
+    printf "header {\n\tmagic: 0x%08x\n\tversion: %u\n"
+      . "\tfirstCSize: %u\n\totherCSize: %u\n}\n",
+      $magic, $version, $firstCSize, $otherCSize;
+}
+else {
+    die("Bad CacheItems version: $version");
+}
+
+if (defined($sfid)) {
+    ($scell, $svol, $svnode, $suniq) = split /[.]/, "$sfid";
+    unless (defined($scell)
+        && defined($svol)
+        && defined($svnode)
+        && defined($suniq))
+    {
+        die "$usage\n";
+    }
+    print "search for cell $scell vol $svol vnode $svnode uniq $suniq\n";
+}
 
 my $index = 0;
-
 my $code;
-
-while (($code = read(CACHEITEMS, $buf, $FCACHE_SIZE)) > 0) {
-	my ($cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo, $chunk, $inode, $chunkBytes, $states) =
-	    unpack("LLLLLLLLQLC", $buf);
-	if ($cell == $scell && $vol == $svol && $vnode == $svnode && $uniq == $suniq) {
-		print "index $index (fid $cell.$vol.$vnode.$uniq)\n";
-	}
-	$index++;
+while (($code = read(CACHEITEMS, $buf, $dataSize)) > 0) {
+    my ($cell, $vol, $vnode, $uniq) = unpack("LLLL", $buf);
+    if (defined($sfid)) {
+        if (   $cell == $scell
+            && $vol == $svol
+            && $vnode == $svnode
+            && $uniq == $suniq)
+        {
+            print "index $index (fid $cell.$vol.$vnode.$uniq)\n";
+        }
+    }
+    else {
+        if ($cell && $vol && $vnode) {
+            print "index $index (fid $cell.$vol.$vnode.$uniq)\n";
+        }
+    }
+    $index++;
 }
