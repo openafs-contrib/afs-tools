@@ -47,6 +47,17 @@ for my $fid (@fids) {
 
 if (defined($cacheitems) and not $cacheitems) {
 	$cacheitems = "/usr/vice/cache/CacheItems";
+
+	if (open(CACHEINFO, "<", "/usr/vice/etc/cacheinfo")) {
+		my $str = <CACHEINFO>;
+		close(CACHEINFO);
+
+		chomp $str;
+		$str = (split(':', $str))[1];
+		$cacheitems = "$str/CacheItems";
+	}
+
+	if ($v) { print "Using CacheItems path: $cacheitems\n"; }
 }
 
 if ($cacheitems) {
