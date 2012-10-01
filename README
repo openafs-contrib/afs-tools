@@ -22,6 +22,8 @@ for sites running OpenAFS.
 afs-audit-volumes - check for volume inconsistencies
 afs-get-versions  - report server versions
 cachestat         - report what is cached for certain files
+ciread            - read data from CacheItems
+cisearch          - search CacheItems for a file
 cw_graphify.pl    - graph rx calls waiting for thread
 volid.pl          - calculate namei volume encoding
 
