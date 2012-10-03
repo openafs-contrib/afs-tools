@@ -1,0 +1,211 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2012, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+=head1 NAME
+
+dirobj - display an AFS directory object file
+
+=head1 SYNOPSIS
+
+B<dirobj> I<file>
+
+=head1 DESCRIPTION
+
+B<dirobj> is a debugging aid for displaying AFS directory object files.
+
+Directory object files are stored on AFS fileservers in the /vicep*/AFSIDat
+directories. The volinfo and volscan tools can be useful for determining which
+files to examine.
+
+=head1 OPTIONS
+
+=over 8
+
+=item I<file>
+
+The directory object file name.
+
+=back
+
+=head1 EXAMPLES
+
+The directory object file can be found using volscan. For example, to find the
+directory corresponding to the fid 536870921.3.207
+
+    # volscan -part a -volume 536870921 -find dir -output fid namei | grep 536870921.3.207
+    536870921.3.207 /vicepa/AFSIDat/7/7+++U/+/+/1++++wA
+
+The directory object can be decoded with,
+
+    # dirobj /vicepa/AFSIDat/7/7+++U/+/+/1++++wA
+
+=head1 SEE ALSO
+
+    AFS-3 Directory Object Type Definition
+    http://www.ietf.org/id/draft-keiser-afs3-directory-object-00.txt
+
+=head1 COPYRIGHT
+
+Copyright (c) 2012, Sine Nomine Associates
+
+=cut
+
+use strict;
+use warnings;
+use Getopt::Long;
+
+use constant {
+    AFS_PAGESIZE => 2048,   # the size of each page in an AFS-3 directory object (in octets)
+    MAXPAGES     => 128,    # the maximum number of pages in a legacy directory object
+    BIGMAXPAGES  => 1023,   # the maximum number of pages in a new (circa 1988) directory object
+    NHASHENT     => 128,    # number of hash buckets in the entry name hash table
+    RECSIZE      => 32,     # number of octets in a record
+    LRECSIZE     => 5,      # base-2 logarithm of RECSIZE
+    EPP          => 64,     # number of records per page
+    LEPP         => 6,      # base-2 logarithm of EPP
+    DHE          => 12,     # number of records taken up in page 0 by the directory header
+};
+
+my $opt_verbose = 0;
+GetOptions('verbose|v' => \$opt_verbose,);
+
+my $file = shift;
+unless (defined($file)) {
+    die "usage: dirobj [--verbose] <file>\n";
+}
+
+open(DIR, "<", $file) or die("Cannot open $file: $!");
+
+my $filesize = (stat($file))[7];
+my $npages   = int($filesize / AFS_PAGESIZE);
+
+if ($opt_verbose) {
+    print "filesize: $filesize\n";
+    print "npages: $npages\n";
+}
+if ($filesize % AFS_PAGESIZE != 0) {
+    print "WARNING: file size is not on a page boundary!\n";
+}
+if ($npages < 1) {
+    print "WARNING: file has no pages!\n";
+}
+if ($npages > BIGMAXPAGES) {
+    printf "WARNING: file is larger than BIGMAXPAGES (%d)\n", BIGMAXPAGES;
+}
+
+my $buf;
+my ($index, $page, $record) = (0, 0, 0);
+my ($pgcount, $tag, $r1, $bitmap, $r2);
+my @pagemap;
+my @hashchain;
+my ($flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+my $extend = 0;
+my $fullname = '';
+
+for ($page = 0 ; $page < $npages ; $page++) {
+    for ($record = 0 ; $record < EPP ; $record++, $index++) {
+        if ($opt_verbose) {
+            print "page: $page record: $record index: $index extend: $extend\n";
+        }
+        if ($record == 0) {
+            # First record of each page is a page header.
+            read(DIR, $buf, RECSIZE) == RECSIZE
+              or die "failed to read page $page record $record: $!";
+            ($pgcount, $tag, $r1, $bitmap, $r2) = unpack('nnCb64C19', $buf);
+            my @bit = split(//, $bitmap);
+            printf(
+                "index %u pageheader={\n\tpgcount: %u\n\ttag: %u\n\tbitmap={\n",
+                $index, $pgcount, $tag);
+            for (my $i = 0 ; $i < EPP ; $i++) {
+                if ($opt_verbose || $bit[$i] != 0) {
+                    printf("\t\t%u: %u\n", $i, $bit[$i]);
+                }
+            }
+            printf("\t}\n}\n");
+        }
+        elsif ($page == 0 && $record == 1) {
+            # Records 1 to 12 of the first page is the directory header.
+            read(DIR, $buf, 4 * RECSIZE) == (4 * RECSIZE)
+              or die "failed to directory header: $!";
+            @pagemap = unpack('C' x MAXPAGES, $buf);
+
+            read(DIR, $buf, 8 * RECSIZE) == (8 * RECSIZE)
+              or die "failed to directory header: $!";
+            @hashchain = unpack('n' x NHASHENT, $buf);
+
+            printf("index %u dirheader={\n\tpagemap={\n", $index);
+            for (my $i = 0 ; $i < MAXPAGES ; $i++) {
+                if ($opt_verbose || $pagemap[$i] != EPP) {
+                    printf("\t\t%u: %u\n", $i, $pagemap[$i]);
+                }
+            }
+            printf("\t}\n\thashchain={\n", $index);
+            for (my $i = 0 ; $i < NHASHENT ; $i++) {
+                if ($opt_verbose || $hashchain[$i] != 0) {
+                    printf("\t\t%u: %u\n", $i, $hashchain[$i]);
+                }
+            }
+            printf("\t}\n}\n");
+
+            # 12 records just read, so bump the record and index counters.
+            $record += 11;
+            $index  += 11;
+        }
+        elsif ($extend) {
+            read(DIR, $buf, RECSIZE) == RECSIZE
+              or die "failed to read page $page record $record: $!";
+            ($name) = unpack('A32', $buf);
+            ($hex) = unpack('H64', $buf);
+            $hex =~ s/(..)/ $1/g;
+            $extend++;
+            $fullname .= $name;
+            if (name_blobs($fullname) <= $extend) {
+                $extend = 0;
+                $fullname = '';
+            }
+            printf("index %u extend={\n\tname: '%s'%s\n}\n", $index, $name, $hex);
+        }
+        else {
+            read(DIR, $buf, RECSIZE) == RECSIZE
+              or die "failed to read page $page record $record: $!";
+            ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
+            (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
+            $hex =~ s/(..)/ $1/g;
+            if (name_blobs($name) > 1) {
+                $extend = 1;
+                $fullname = $name;
+            }
+            if ($opt_verbose || $flags != 0) {
+                printf("index %u dirent={\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
+                    "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: '%s'%s\n}\n",
+                    $index, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+            }
+        }
+    }
+}
+
+close(DIR);
+
+#--------------------------------------------------------------------
+# Calculate number of records needed for a name.
+# Taken from OpenAFS source code, src/dir/dir.c
+#
+sub name_blobs
+{
+    my $size = length($_[0]) + 1; # include nul
+    my $magic = 15;
+    return int(($size + $magic)/RECSIZE) + 1;
+}
