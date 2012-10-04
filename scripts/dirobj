@@ -65,7 +65,6 @@ Copyright (c) 2012, Sine Nomine Associates
 
 use strict;
 use warnings;
-use Getopt::Long;
 
 use constant {
     AFS_PAGESIZE => 2048,   # the size of each page in an AFS-3 directory object (in octets)
@@ -79,12 +78,9 @@ use constant {
     DHE          => 12,     # number of records taken up in page 0 by the directory header
 };
 
-my $opt_verbose = 0;
-GetOptions('verbose|v' => \$opt_verbose,);
-
 my $file = shift;
 unless (defined($file)) {
-    die "usage: dirobj [--verbose] <file>\n";
+    die "usage: dirobj <file>\n";
 }
 
 open(DIR, "<", $file) or die("Cannot open $file: $!");
@@ -92,10 +88,8 @@ open(DIR, "<", $file) or die("Cannot open $file: $!");
 my $filesize = (stat($file))[7];
 my $npages   = int($filesize / AFS_PAGESIZE);
 
-if ($opt_verbose) {
-    print "filesize: $filesize\n";
-    print "npages: $npages\n";
-}
+print "filesize: $filesize\n";
+print "npages: $npages\n";
 if ($filesize % AFS_PAGESIZE != 0) {
     print "WARNING: file size is not on a page boundary!\n";
 }
@@ -107,19 +101,14 @@ if ($npages > BIGMAXPAGES) {
 }
 
 my $buf;
-my ($index, $page, $record) = (0, 0, 0);
+my ($index, $page, $record, $extend) = (0, 0, 0, 0);
 my ($pgcount, $tag, $r1, $bitmap, $r2);
 my @pagemap;
 my @hashchain;
 my ($flags, $reserved, $next, $vnode, $uniq, $name, $hex);
-my $extend = 0;
-my $fullname = '';
 
-for ($page = 0 ; $page < $npages ; $page++) {
+for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
     for ($record = 0 ; $record < EPP ; $record++, $index++) {
-        if ($opt_verbose) {
-            print "page: $page record: $record index: $index extend: $extend\n";
-        }
         if ($record == 0) {
             # First record of each page is a page header.
             read(DIR, $buf, RECSIZE) == RECSIZE
@@ -130,9 +119,7 @@ for ($page = 0 ; $page < $npages ; $page++) {
                 "index %u pageheader={\n\tpgcount: %u\n\ttag: %u\n\tbitmap={\n",
                 $index, $pgcount, $tag);
             for (my $i = 0 ; $i < EPP ; $i++) {
-                if ($opt_verbose || $bit[$i] != 0) {
-                    printf("\t\t%u: %u\n", $i, $bit[$i]);
-                }
+                printf("\t\t%u: %u\n", $i, $bit[$i]);
             }
             printf("\t}\n}\n");
         }
@@ -148,15 +135,11 @@ for ($page = 0 ; $page < $npages ; $page++) {
 
             printf("index %u dirheader={\n\tpagemap={\n", $index);
             for (my $i = 0 ; $i < MAXPAGES ; $i++) {
-                if ($opt_verbose || $pagemap[$i] != EPP) {
-                    printf("\t\t%u: %u\n", $i, $pagemap[$i]);
-                }
+                printf("\t\t%u: %u\n", $i, $pagemap[$i]);
             }
             printf("\t}\n\thashchain={\n", $index);
             for (my $i = 0 ; $i < NHASHENT ; $i++) {
-                if ($opt_verbose || $hashchain[$i] != 0) {
-                    printf("\t\t%u: %u\n", $i, $hashchain[$i]);
-                }
+                printf("\t\t%u: %u\n", $i, $hashchain[$i]);
             }
             printf("\t}\n}\n");
 
@@ -164,48 +147,29 @@ for ($page = 0 ; $page < $npages ; $page++) {
             $record += 11;
             $index  += 11;
         }
-        elsif ($extend) {
-            read(DIR, $buf, RECSIZE) == RECSIZE
-              or die "failed to read page $page record $record: $!";
-            ($name) = unpack('A32', $buf);
-            ($hex) = unpack('H64', $buf);
-            $hex =~ s/(..)/ $1/g;
-            $extend++;
-            $fullname .= $name;
-            if (name_blobs($fullname) <= $extend) {
-                $extend = 0;
-                $fullname = '';
-            }
-            printf("index %u extend={\n\tname: '%s'%s\n}\n", $index, $name, $hex);
-        }
         else {
             read(DIR, $buf, RECSIZE) == RECSIZE
               or die "failed to read page $page record $record: $!";
-            ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
-            (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
-            $hex =~ s/(..)/ $1/g;
-            if (name_blobs($name) > 1) {
-                $extend = 1;
-                $fullname = $name;
-            }
-            if ($opt_verbose || $flags != 0) {
+
+            if (!$extend) {
+                ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
+                (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
+                $hex =~ s/(..)/ $1/g;
+
                 printf("index %u dirent={\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
                     "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: '%s'%s\n}\n",
                     $index, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
             }
+            else {
+                ($name) = unpack('A32', $buf);
+                ($hex) = unpack('H64', $buf);
+                $hex =~ s/(..)/ $1/g;
+                printf("index %u extend: '%s'%s\n", $index, $name, $hex);
+            }
+
+            $extend = ($hex =~ /00/ ? 0 : 1); # next record is an continuation if not terminated
         }
     }
 }
 
 close(DIR);
-
-#--------------------------------------------------------------------
-# Calculate number of records needed for a name.
-# Taken from OpenAFS source code, src/dir/dir.c
-#
-sub name_blobs
-{
-    my $size = length($_[0]) + 1; # include nul
-    my $magic = 15;
-    return int(($size + $magic)/RECSIZE) + 1;
-}
