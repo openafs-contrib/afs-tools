@@ -65,6 +65,7 @@ Copyright (c) 2012, Sine Nomine Associates
 
 use strict;
 use warnings;
+use Getopt::Long;
 
 use constant {
     AFS_PAGESIZE => 2048,   # the size of each page in an AFS-3 directory object (in octets)
@@ -78,9 +79,14 @@ use constant {
     DHE          => 12,     # number of records taken up in page 0 by the directory header
 };
 
+my $opt_show_freed = 0;
+GetOptions(
+   'show-freed' => \$opt_show_freed,
+);
+
 my $file = shift;
 unless (defined($file)) {
-    die "usage: dirobj <file>\n";
+    die "usage: dirobj [--show-freed] <file>\n";
 }
 
 open(DIR, "<", $file) or die("Cannot open $file: $!");
@@ -106,26 +112,27 @@ my ($pgcount, $tag, $r1, $bitmap, $r2);
 my @pagemap;
 my @hashchain;
 my ($flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+my @freemap = ();
 
 for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
     for ($record = 0 ; $record < EPP ; $record++, $index++) {
         if ($record == 0) {
             # First record of each page is a page header.
-            read(DIR, $buf, RECSIZE) == RECSIZE
+            (read(DIR, $buf, RECSIZE) == RECSIZE)
               or die "failed to read page $page record $record: $!";
             ($pgcount, $tag, $r1, $bitmap, $r2) = unpack('nnCb64C19', $buf);
-            my @bit = split(//, $bitmap);
+            @freemap = split(//, $bitmap);
             printf(
                 "index %u pageheader={\n\tpgcount: %u\n\ttag: %u\n\tbitmap={\n",
                 $index, $pgcount, $tag);
             for (my $i = 0 ; $i < EPP ; $i++) {
-                printf("\t\t%u: %u\n", $i, $bit[$i]);
+                printf("\t\t%u: %u\n", $i, $freemap[$i]);
             }
             printf("\t}\n}\n");
         }
         elsif ($page == 0 && $record == 1) {
             # Records 1 to 12 of the first page is the directory header.
-            read(DIR, $buf, 4 * RECSIZE) == (4 * RECSIZE)
+            (read(DIR, $buf, 4 * RECSIZE) == (4 * RECSIZE))
               or die "failed to directory header: $!";
             @pagemap = unpack('C' x MAXPAGES, $buf);
 
@@ -147,8 +154,9 @@ for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
             $record += 11;
             $index  += 11;
         }
-        else {
-            read(DIR, $buf, RECSIZE) == RECSIZE
+        elsif ($opt_show_freed || $freemap[$record]) {
+
+            (read(DIR, $buf, RECSIZE) == RECSIZE)
               or die "failed to read page $page record $record: $!";
 
             if (!$extend) {
@@ -164,7 +172,7 @@ for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
                 ($name) = unpack('A32', $buf);
                 ($hex) = unpack('H64', $buf);
                 $hex =~ s/(..)/ $1/g;
-                printf("index %u extend: '%s'%s\n", $index, $name, $hex);
+                printf("index %u extend={\n\tname: '%s'%s\n}\n", $index, $name, $hex);
             }
 
             $extend = ($hex =~ /00/ ? 0 : 1); # next record is an continuation if not terminated
