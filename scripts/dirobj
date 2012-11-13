@@ -80,13 +80,15 @@ use constant {
 };
 
 my $opt_show_freed = 0;
+my $opt_full_names = 0;
 GetOptions(
    'show-freed' => \$opt_show_freed,
+   'full-names' => \$opt_full_names,
 );
 
 my $file = shift;
 unless (defined($file)) {
-    die "usage: dirobj [--show-freed] <file>\n";
+    die "usage: dirobj [--show-freed] [--full-names] <file>\n";
 }
 
 open(DIR, "<", $file) or die("Cannot open $file: $!");
@@ -173,15 +175,29 @@ for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
                 (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
                 $hex =~ s/(..)/ $1/g;
 
+		my $showhex = $hex;
+
+		if (!$opt_full_names) {
+		    $showhex =~ s/00.*$//;
+		    $name =~ s/\0.*$//;
+                }
+
                 printf("index %u %sdirent={\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
                     "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: '%s'%s\n}\n",
-                    $index, $free, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+                    $index, $free, $flags, $reserved, $next, $vnode, $uniq, $name, $showhex);
             }
             else {
                 ($name) = unpack('A32', $buf);
                 ($hex) = unpack('H64', $buf);
                 $hex =~ s/(..)/ $1/g;
-                printf("index %u %sextend={\n\tname: '%s'%s\n}\n", $index, $free, $name, $hex);
+		my $showhex = $hex;
+
+		if (!$opt_full_names) {
+		    $showhex =~ s/00.*$//;
+		    $name =~ s/\0.*$//;
+                }
+
+                printf("index %u %sextend={\n\tname: '%s'%s\n}\n", $index, $free, $name, $showhex);
             }
 
             $extend = ($hex =~ /00/ ? 0 : 1); # next record is an continuation if not terminated
