@@ -163,20 +163,25 @@ for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
 		next;
 	    }
 
+	    my $free = '';
+	    if (!$freemap[$record]) {
+	        $free = "FREE ";
+	    }
+
             if (!$extend) {
                 ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
                 (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
                 $hex =~ s/(..)/ $1/g;
 
-                printf("index %u dirent={\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
+                printf("index %u %sdirent={\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
                     "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: '%s'%s\n}\n",
-                    $index, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+                    $index, $free, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
             }
             else {
                 ($name) = unpack('A32', $buf);
                 ($hex) = unpack('H64', $buf);
                 $hex =~ s/(..)/ $1/g;
-                printf("index %u extend={\n\tname: '%s'%s\n}\n", $index, $name, $hex);
+                printf("index %u %sextend={\n\tname: '%s'%s\n}\n", $index, $free, $name, $hex);
             }
 
             $extend = ($hex =~ /00/ ? 0 : 1); # next record is an continuation if not terminated
