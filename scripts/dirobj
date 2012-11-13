@@ -154,10 +154,14 @@ for ($page = 0 ; $page < $npages ; $page++, $extend=0) {
             $record += 11;
             $index  += 11;
         }
-        elsif ($opt_show_freed || $freemap[$record]) {
-
+        else {
             (read(DIR, $buf, RECSIZE) == RECSIZE)
               or die "failed to read page $page record $record: $!";
+
+            if (!($opt_show_freed || $freemap[$record])) {
+                # entry is freed, don't show it
+		next;
+	    }
 
             if (!$extend) {
                 ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
