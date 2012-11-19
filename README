@@ -15,20 +15,23 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --------------------------------------------------------------------
 
-This directory contains various programs that maybe useful 
-for sites running OpenAFS. 
+This directory contains various programs that maybe useful
+for sites running OpenAFS.
 
-./scripts:        - misc afs scripts
-afs-audit-volumes - check for volume inconsistencies
-afs-get-versions  - report server versions
-cachestat         - report what is cached for certain files
-ciread            - read data from CacheItems
-cisearch          - search CacheItems for a file
-cw_graphify.pl    - graph rx calls waiting for thread
-volid.pl          - calculate namei volume encoding
+admin/:             - misc afs scripts
+  afs-audit-volumes - check for volume inconsistencies
+  afs-get-versions  - report server versions
+  afs-vol-paths     - process output of volscan
 
-./snips:          - snips monitor for afs
-afsmon
-afsmon-confg
+debug/              - debugging tools
+  cachestat         - report what is cached for certain files
+  ciread            - read data from CacheItems
+  cisearch          - search CacheItems for a file
+  dirobj            - decode afs directory objects
+  calc-namei        - calculate namei volume encoding
+
+monitor/            - monitoring and related
+  cw_graphify.pl    - graph rx calls waiting for thread
+  snips             - `snips' plugin for afs
 
 
