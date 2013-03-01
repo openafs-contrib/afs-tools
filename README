@@ -1,4 +1,4 @@
-Copyright (c) 2008-2011, Sine Nomine Associates
+Copyright (c) 2008-2013, Sine Nomine Associates
 All rights reserved.
 
 Permission to use, copy, modify, and/or distribute this software for any
@@ -18,7 +18,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 This directory contains various programs that maybe useful
 for sites running OpenAFS.
 
-admin/:             - misc afs scripts
+admin/              - misc afs scripts
   afs-audit-volumes - check for volume inconsistencies
   afs-get-versions  - report server versions
   afs-vol-paths     - process output of volscan
