@@ -23,7 +23,7 @@ afs-get-versions - report afs server versions
 
 =head1 SYNOPSIS
 
-B<afs-get-versions> [B<--cell> <I<cellname>>] [B<--showbuild>]
+B<afs-get-versions> [B<--cell> <I<cellname>>]
 
 =head1 DESCRIPTION
 
@@ -49,10 +49,6 @@ the B<vos changeaddr> command with the B<-remove> argument.
 
 Names the cell in which to run the command. Uses the local
 cell if not speficied.
-
-=item B<--showbuild>
-
-Show the build date returned by rxdebug.
 
 =back
 
@@ -83,10 +79,8 @@ my %service_port = (
 
 my $opt_cell = "";
 my $opt_help = 0;
-my $opt_show_build_date = 0;
 GetOptions(
     "cell|c=s"  => \$opt_cell,
-    "showbuild|b" => \$opt_show_build_date,
     "help|h|?"  => \$opt_help,
 ) or pod2usage(2);
 pod2usage(1) if $opt_help;
@@ -200,8 +194,7 @@ sub report_version
         chomp;
         if (/^AFS version:  (.*)/) {
             $version = $1;
-            #printf("%s (%s:%d) %s %s\n", $hostname, $ip, $port, $service, $version);
-            printf("%s %s %s\n", $hostname, $service, $version);
+            printf("%s (%s:%d) %s %s\n", $hostname, $ip, $port, $service, $version);
             last;
         }
     }
