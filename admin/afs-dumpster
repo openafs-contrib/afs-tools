@@ -1,0 +1,194 @@
+#!/bin/bash
+#
+# A simple tool to do nightly dumps of afs volumes.
+# Do a full dump of every backup volume. Use the
+# afsdump_scan tool to avoid dumping backup volumes
+# which are have not been changed since the last dump.
+#
+# Use in conjuction with vos backupsys and something
+# to backup the volume dump files in the DUMPDIR
+# directory.
+#
+# Copyright (c) 2011, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+# Michael Meffie <mmeffie@sinenomine.net>
+#
+
+# configuration
+DUMPDIR=/srv/afsbackup/dumps
+LOCALAUTH=-localauth
+VOS=/usr/sbin/vos
+DUMPSCAN=/usr/local/bin/afsdump_scan
+
+#-----------------------------------------------------------------------
+# Print usage then exit.
+#
+usage()
+{
+    progname=`basename $0`
+    echo "usage: $progname dump <volume> [--reclone]"
+    echo "       $progname dumpsys"
+    echo "       $progname dumpgc"
+    exit 255
+}
+
+#-----------------------------------------------------------------------
+# Exit on fatal errors.
+#
+die()
+{
+    echo "$@" >&2
+    exit 1
+}
+
+#-----------------------------------------------------------------------
+# Dump a single backup volume, if the volume contents have changed
+# since the last dump.
+#
+dump()
+{
+    # trim the backup extension, if one
+    local volume=`echo $1 | sed s/\.backup$//`
+    local reclone=no
+    local dump="$DUMPDIR/$volume.dump"
+    local vldb=
+    local vdate=
+    local fdate=
+
+    # Process args.
+    if [ "x$volume" = "x" ]; then
+        echo "error: missing volume argument."
+	return 1
+    fi
+    if [ "$2" = "--reclone" ]; then
+        reclone=yes
+    fi
+
+    #
+    # The volume must exist and have a backup volume.
+    #
+    vldb=`$VOS listvldb -name "$volume" -noresolve -quiet -noauth 2>&1`
+    if echo $vldb | grep -q "VLDB: no such entry"; then
+	echo "skipping volume '$volume'; volume not found."
+	return 1
+    fi
+    if echo $vldb | grep -q "Backup: [0-9]*"; then
+	:
+    else
+	echo "skipping volume '$volume'; no backup volume."
+	return 0
+    fi
+
+    # Optionally, reclone the backup volume now.
+    if [ "$reclone" = "yes" ]; then
+        echo "recloning the backup for volume '$volume'."
+        $VOS backup -id "$volume" $LOCALAUTH
+        echo "recloning done for volume '$volume': code=$?"
+    fi
+
+    #
+    # Skip dumps when the dump file is already up to date.
+    # XXX: Ignore the missing 'h' largefile support in
+    #      afsdump_scan.
+    #
+    if [ -f "$dump" ]; then
+        vdate=`$VOS examine -id "$volume.backup" $LOCALAUTH 2>/dev/null | grep 'Last Update' | sed 's/^  *Last Update //;'`
+        fdate=`$DUMPSCAN -PV "$dump" 2>/dev/null | grep 'Updated:' | sed 's/  *Updated:  *//'`
+	if [ "x$vdate" != "x" -a "$vdate" = "$fdate" ]; then
+	    echo "skipping volume '$volume': already up to date."
+	    return 0
+	fi
+    fi
+
+    #
+    # Dump the volume.
+    #
+    echo "start:  dumping volume '$volume' to '$dump'."
+    $VOS dump -id "$volume.backup" -time "0" -file "$dump" -omitdirs -verbose $LOCALAUTH
+    if [ $? -ne 0 ]; then
+        echo "fail:   dumping volume '$volume' to '$dump'."
+	if [ -f "$dump" ]; then
+            echo "removing incomplete dump file '$dump'."
+	    rm "$dump"
+	fi
+	return 1
+    fi
+    echo "done:   dumping volume '$volume' to '$dump'."
+}
+
+#-----------------------------------------------------------------------
+# Garbage collect old dump files. Remove dumps for volumes which
+# have been deleted or renamed after a grace period since the
+# last time the volume dump was changed.
+#
+dumpgc()
+{
+    local vols=`$VOS listvldb -noresolve -quiet -noauth 2>&1 | grep -v '^ *$' | grep -v '^ ' | sed 's/  *$//;'`
+    echo "start: gargbage collecting dump files."
+    find $DUMPDIR -type f -name '*.dump' -mtime +90 | while read dump
+    do
+        vol=`basename $dump .dump`
+        if echo "$vols" | grep -q "^$vol\$"; then
+            : # volume still present
+        else
+            echo "Volume '$vol' was deleted; removing old dump file '$dump'."
+            rm $dump
+        fi
+    done
+    echo "done:  gargbage collecting dump files."
+}
+
+#-----------------------------------------------------------------------
+# Dump all of the backup volumes which have changed since the last
+# dump.
+#
+dumpsys()
+{
+    local vols=`$VOS listvldb -noresolve -quiet -noauth 2>&1 | grep -v '^ *$' | grep -v '^ ' | sed 's/  *$//'`
+    echo "start: dumping all volumes."
+    echo "$vols" | while read vol
+    do
+	dump "$vol"
+    done
+    echo "done:  dumping all volumes."
+}
+
+#-----------------------------------------------------------------------
+# Main
+#
+
+# create target directories if missing.
+if [ ! -d "$DUMPDIR" ]; then
+    mkdir -p $DUMPDIR || die "Failed to make dir $DUMDIR: $?"
+fi
+
+case "$1" in
+    dump) # volume [--reclone]
+        if [ $# -lt 2 ]; then
+            usage
+        fi
+        dump "$2" "$3"
+        ;;
+    dumpsys)
+        dumpsys
+        dumpgc
+        ;;
+    dumpgc)
+        dumpgc
+        ;;
+    *)
+        usage
+        ;;
+esac
