@@ -23,14 +23,14 @@ Give a list of file names which contain the output from volscan for
 each fileserver.  Use the following options to volscan:
 
     volscan \
-      -find mounts \
+      -find mount \
       -output host partid vname vid vtype mtype mcell mvol path \
-      -noheader
+      -noheading
 
 Specify - (dash) to read the volscan data from stdin.
 
-Cross cell mount points are ignored by this program. Specify
-the --cell option your cell includes cellular mount points.
+Cross-cell mount points are ignored by this program. Specify
+the --cell option if your cell includes cellular mount points.
 
 =head1 OPTIONS
 
