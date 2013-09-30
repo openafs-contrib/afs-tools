@@ -133,7 +133,7 @@ sub read_mounts {
 
         next if $vtype eq "BK"; # skip backups
 
-        if ($mcell ne "--") {
+        if ($mcell ne "-") {
             if ($opt_cell && $mcell ne $opt_cell) {
                 next; # skip cross cell
             }
