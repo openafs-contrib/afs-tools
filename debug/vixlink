@@ -1,0 +1,74 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2014, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+#
+# Check the output of volinfo for cross-linked volumes,
+# that is, clone volumes which do not reside in the same
+# partition as the read-write parent volume.
+#
+# usage: vixlink <volinfo-output>
+#        volinfo | vixlink
+#
+# where <volinfo-output> is the output of the volinfo command
+# for the whole fileserver.
+#
+
+my $part;
+my $vid;
+my $pvid;
+
+my $rw = {}; # rw volume headers
+my $cl = {}; # cl and ro volume headers
+
+# Read the volinfo output, getting the read-write
+# volumes, and the read-only/clone volumes (which
+# have an id different than the parent id.)
+while (<>) {
+  if (/^Processing Partition \/vicep(.*):/) {
+    $part = $1;
+  }
+  if (/^id = (\d+), parentId = (\d+),/) {
+    $vid = $1;
+    $pvid = $2;
+    if ($vid eq $pvid) {
+      if ($rw->{$vid}) {
+        warn "Duplicate rw id: $part, $vid";
+      } else {
+        $rw->{$vid} = {vid=>$vid, part=>$part};
+      }
+    } else {
+      if ($cl->{$vid}) {
+        warn "Duplicate cl id: $part, $vid, $pvid";
+      } else {
+        $cl->{$vid} = {vid=>$vid, pvid=>$pvid, part=>$part};
+      }
+    }
+  }
+}
+
+# Walk the list of clone/ro volumes, and if the volume
+# has a parent on this server, verify the clone/ro is on
+# the same partition as the rw.
+foreach $vid (keys %{$cl}) {
+  my $c = $cl->{$vid};
+  if ($rw->{$c->{pvid}}) {  # parent on this server?
+    my $r = $rw->{$c->{pvid}};
+    if ($c->{part} ne $r->{part}) {
+      printf "Volume %s on partition %s should be on partition %s (rw is %s).\n",
+        $c->{vid}, $c->{part}, $r->{part}, $r->{vid};
+    }
+  }
+}
+
