@@ -1,0 +1,180 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2012, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+=head1 NAME
+
+volnamei - convert volume numbers to AFS fileserver namei paths
+
+=head1 SYNOPSIS
+
+B<volnamei> I<volume-id> [I<volume-id> ...] [--partid|-p I<partid>]
+
+B<volnamei> I<namei-path> [I<namei-path> ...]
+
+B<volnamei> B<--file|-f> I<file> [--partid|-p I<partid>]
+
+=head1 DESCRIPTION
+
+B<volnamei> is a debugging aid to convert AFS volume numbers to fileserver
+namei paths (e.g. F</vicepa/AFSIDat/*/*>) or to convert namei paths to
+volume numbers.  B<volnamei> does not affect AFS fileservers.
+
+Multiple volume numbers or namei paths may be given at a time.
+
+=head1 OPTIONS
+
+=over 8
+
+=item I<volume-id>
+
+A numeric volume id.
+
+=item I<namei-path>
+
+A fileserver namei path, starting with /vicep*/AFSIDat/.
+
+=item B<--file|-f> I<file>
+
+An input file containing a list of volume numbers or namei
+paths to be converted, one item per line.  B<volnamei> will
+read from standard input when C<-> (a single dash)
+is given for I<file>.
+
+=item B<--partid|-p> I<partid>
+
+Print namei paths as C</vicepI<partid>>, instead of with the
+wildcard C<*>.
+
+=back
+
+=head1 EXAMPLES
+
+Find the namei paths for two volumes:
+
+    $ volnamei 536870925 536870913
+    536870925:    /vicep*/AFSIDat/B/B+++U
+    536870913:    /vicep*/AFSIDat/=/=+++U
+
+Find the volume number for a namei path:
+
+    $ volnamei /vicepa/AFSIDat/C/C+++U
+    536870926:    /vicep*/AFSIDat/C/C+++U
+
+Find all the namei paths for the volumes on C<fs1>
+parition a, using grep to filter out the volume numbers from
+vos listvol:
+
+    $ vos listvol fs1 a -fast | grep '^[0-9]' | volnamei -p a -f -
+    536870925:    /vicepa/AFSIDat/B/B+++U
+    536870912:    /vicepa/AFSIDat/+/++++U
+    ...
+
+=head1 COPYRIGHT
+
+Copyright (c) 2012, Sine Nomine Associates
+
+=cut
+
+use strict;
+use Getopt::Long;
+
+my $input;
+my $partid = "*";
+my @forward = ('+', '=', '0'..'9', 'A'..'Z', 'a'..'z');
+my %reverse;
+for (my $i = 0; $i < scalar @forward; $i++) {
+    $reverse{$forward[$i]} = $i;
+}
+
+GetOptions(
+  'file|f=s' => \$input,
+  'partid|p=s' => \$partid,
+) or usage();
+if (!defined $input && scalar @ARGV == 0) {
+    usage();
+}
+if (defined $input && scalar @ARGV != 0) {
+    usage();
+}
+
+if (defined $input) {
+    my $fh;
+    open($fh, "< $input") or die "Failed to open input: $input: $!\n";
+    while (<$fh>) {
+        chomp;
+        s/\s+//; s/\s+$//;  # trim leading/trailing whitepace
+        convert($_);
+    }
+    close($fh);
+} else {
+    foreach my $arg (@ARGV) {
+        convert($arg);
+    }
+}
+
+sub usage {
+    print STDERR "usage: volnamei <volume-id> [<volume-id> ...]\n";
+    print STDERR "       volnamei <namei-path> [<namei-path> ...]\n";
+    print STDERR "       volnamei -f <input>\n";
+    exit(1);
+}
+
+sub convert {
+    my $arg = shift;
+    if ( $arg =~ /^\d+$/ ) {
+        my $volid = $arg; # $arg has to be the ID of a RW volume
+        my $path = "/vicep$partid/AFSIDat/" . num_to_char($volid & 0xff) . "/" . num_to_char($volid);
+        printf "%9d:    %s\n", $volid, $path;
+    } elsif ($arg =~ m!^/vicep[a-z]{1,2}/AFSIDat/([^/]+)/([^/]+)!) {
+        my ($dir1, $dir2) = ($1, $2);
+        my $path = "/vicep$partid/AFSIDat/$dir1/$dir2";
+        my $volid = char_to_num($dir2);
+        printf "%9d:    %s\n", $volid, $path;
+    } else {
+        warn "Not a number or namei path: $arg\n";
+    }
+}
+
+sub char_to_num {
+    my $dir = shift;
+    my $result;
+    my $shift = 0;
+    foreach my $char (split //, $dir) {
+        my $n = $reverse{$char};
+        $n <<= $shift;
+        $shift += 6;
+        $result |= $n;
+    }
+    return $result;
+}
+
+sub num_to_char {
+    my $number = shift;
+    my $string;
+    unless ( $number ) {
+        $string = $forward[0];
+    } else {
+        my @string;
+        my $index = 0;
+        while ($number) {
+            $string[$index] = $forward[ $number & 0x3f ];
+            $index++;
+            $number >>= 6;
+        }
+        $string = join "", @string;
+    }
+    return $string;
+}
