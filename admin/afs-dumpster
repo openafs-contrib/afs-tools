@@ -1,15 +1,5 @@
 #!/bin/bash
-#
-# A simple tool to do nightly dumps of afs volumes.
-# Do a full dump of every backup volume. Use the
-# afsdump_scan tool to avoid dumping backup volumes
-# which are have not been changed since the last dump.
-#
-# Use in conjuction with vos backupsys and something
-# to backup the volume dump files in the DUMPDIR
-# directory.
-#
-# Copyright (c) 2011, Sine Nomine Associates
+# Copyright (c) 2011-2014, Sine Nomine Associates
 #
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -22,8 +12,15 @@
 # WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#-----------------------------------------------------------------------
+# A simple tool to do nightly dumps of afs volumes.
+# Do a full dump of every backup volume. Use the
+# afsdump_scan tool to avoid dumping backup volumes
+# which are have not been changed since the last dump.
 #
-# Michael Meffie <mmeffie@sinenomine.net>
+# Use in conjuction with vos backupsys and something
+# to backup the volume dump files in the DUMPDIR
+# directory.
 #
 
 # configuration
