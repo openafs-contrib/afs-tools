@@ -1,4 +1,4 @@
-Copyright (c) 2008-2013, Sine Nomine Associates
+Copyright (c) 2008-2014, Sine Nomine Associates
 All rights reserved.
 
 Permission to use, copy, modify, and/or distribute this software for any
@@ -29,7 +29,8 @@ debug/              - debugging tools
   ciread            - read data from CacheItems
   cisearch          - search CacheItems for a file
   dirobj            - decode afs directory objects
-  calc-namei        - calculate namei volume encoding
+  vixlink           - check volinfo output for cross-device link
+  volnamei          - convert volume numbers to fileserver namei paths
 
 monitor/            - monitoring and related
   cw_graphify.pl    - graph rx calls waiting for thread
