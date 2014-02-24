@@ -1,0 +1,150 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2014, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+=head1 NAME
+
+viread - display AFS VolumeItems data
+
+=head1 SYNOPSIS
+
+B<viread> I<file>] [I<index>] [--oneline]
+
+=head1 DESCRIPTION
+
+B<viread> is a debugging aid for displaying the AFS cache manager C<VolumeItems>
+file data. The C<VolumeItems> file is an internal file which stores information
+about AFS volumes.
+
+B<viread> displays the contents of the fvolume records.
+
+=head1 OPTIONS
+
+=over 8
+
+=item I<file>
+
+The full name and path to the C<VolumeItems> file to be read.
+
+=item I<index>
+
+The VolumeItem index (vtix) to be read.  This is used to calculate the offset
+in the VolumeItems file to the fvolume struct to be read. If I<index> is not
+given, all of the records are displayed.
+
+=item [I<--oneline>]
+
+Output a single line for each fvolume read from the VolumeItems file.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2014, Sine Nomine Associates
+
+=cut
+
+use strict;
+use Getopt::Long;
+
+my $buffer;
+my $oneline = 0;
+my $volumeitems;
+my $index;
+
+my $tAFSFid   = "LLL";
+my $tVenusFid = "L${tAFSFid}";
+my $tfvolume  = "LLL${tVenusFid}${tVenusFid}LL";
+my $recordsize = 52;  # sizeof(struct fvolume)
+
+my $long_format =<<"_EOM_";
+index %u
+fvolume {
+\tcell: %u
+\tvolume: %u
+\tnext: %u
+\tdotdot: %u.%u.%u.%u
+\tmtpoint: %u.%u.%u.%u
+\troot: %u.%u
+}
+_EOM_
+my $oneline_format =
+"index:%u " .
+"cell:%u " .
+"volume:%u " .
+"next:%u " .
+"dotdot:%u.%u.%u.%u " .
+"mtpoint:%u.%u.%u.%u " .
+"root:%u.%u\n:";
+
+GetOptions( "--oneline", \$oneline) or usage();
+$volumeitems = shift;
+$index = shift;
+
+unless (defined($volumeitems)) {
+    usage();
+}
+if (defined($index)) {
+    unless ($index =~ /^\d+$/) {
+        die "index must be numeric.\n";
+    }
+}
+
+open(VOLUMEITEMS, "<", $volumeitems) or die("Cannot open $volumeitems: $!");
+
+my $filesize = (stat($volumeitems))[7];
+my $nrecords = $filesize / $recordsize;
+printf "filesize %u\nrecords %u\n", $filesize, $nrecords;
+
+if (defined($index) && $index > 0) {
+    read_record($index);
+} else {
+    for ($index = 1; $index < $nrecords; $index++) {
+        read_record($index);
+    }
+}
+
+close(VOLUMEITEMS);
+
+sub usage {
+    die "usage: viread <file> [<index>] [--oneline]\n";
+}
+
+sub read_record {
+    my $index = shift;
+    my $offset = $recordsize * $index;
+
+    my $code;
+    $code = seek(VOLUMEITEMS, $offset, 0) ||
+        die "Unable to seek to offset $offset: $!";
+    $code = read(VOLUMEITEMS, $buffer, $recordsize) ||
+        die "Unable to read at offset $offset: $!";
+
+    my (
+        $cell, $volume, $next,
+        $dotdot_cell, $dotdot_volume, $dotdot_vnode, $dotdot_unique,
+        $mtpoint_cell, $mtpoint_volume, $mtpoint_vnode, $mtpoint_unique,
+        $root_vnode, $root_unique
+    ) = unpack($tfvolume, $buffer);
+
+    printf($oneline ? $oneline_format : $long_format,
+        $index,
+        $cell, $volume, $next,
+        $dotdot_cell, $dotdot_volume, $dotdot_vnode, $dotdot_unique,
+        $mtpoint_cell, $mtpoint_volume, $mtpoint_vnode, $mtpoint_unique,
+        $root_vnode, $root_unique);
+
+}
+
