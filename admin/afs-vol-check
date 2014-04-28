@@ -1,0 +1,897 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2014, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+=pod
+
+=head1 NAME
+
+afs-vol-check
+
+=head1 SYNOPSIS
+
+afs-volcheck [--level=<n>] [--cell=<cell name>] [--verbose] [--version] [--help]
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--level>=<I<n>>, B<-l> <I<n>>
+
+The B<--level> option specifies the detail level of the checks performed by
+B<afs-vol-check> and the amount of data retrieved from the AFS servers. Specify
+a number 0, 1, or 2. See DESCRIPTION for the types of checks performed for each
+level. The default level is 0 (zero).
+
+=item B<--cell>=<I<cell name>>, B<-c> <I<cell name>>
+
+Name of the cell in which to run the AFS commands when gathering data
+from the AFS servers.
+
+=item B<--verbose>, B<-v>
+
+Print informational messages.
+
+=item B<--help>, B<-h>
+
+Print this help then exit.
+
+=item B<--version>
+
+Print the version number and exit.
+
+=back
+
+=head1 DESCRIPTION
+
+B<afs-vol-check> retrieves AFS volume information from the AFS volume location
+database and, depending on the B<--level> option, retrieves information from
+each file server.  B<afs-vol-check> then performs a series of contistency and
+status checks based on the retrieved data.
+
+The AFS B<vos> command is used to gather information. The B<vos> command must
+be in the current C<PATH>.  An AFS token is not required to run
+B<afs-vol-check>.
+
+=head2 Level 0 Checks
+
+The following checks are performed when B<--level> is 0 (the default
+value).
+
+=over 8
+
+=item missing ro clone sites
+
+Search for replicated volumes which do not have a read-only defined
+on the same partition as the read-write volume.
+
+=item stale locks
+
+Search for locked volumes which do not have active transactions.
+
+=item failed releases
+
+Search for failed releases based on the vldb release flags and
+stale locks check.
+
+=back
+
+=head2 Level 1 Checks
+
+In addition to the level 0 checks, the following checks are performed when
+B<--level> is set to 1. B<afs-vol-check> will run B<vos listvol -fast> for each
+file server when B<--level> is set to 1.
+
+=over
+
+=item missing volumes
+
+Search for volumes which have an entry in the vldb but are not
+found on the fileserver.
+
+=item stray volumes
+
+Search for volumes which were found on the fileserver but do not
+have an entry in the vldb or were found in a location which
+does not match the vldb entry.
+
+=back
+
+=head2 Level 2 Checks
+
+In addition to the level 1 checks, the following checks are performed when
+B<--level> is set to 2. B<afs-vol-check> will run B<vos listvol> for each file
+server when B<--level> is set to 1.
+
+=over
+
+=item names and types
+
+Verify the volume name and type in the volume header matches
+the name and type in the vldb entry for each volume.
+
+=item offline volumes
+
+Search for volumes marked as offline.
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2014, Sine Nomine Associates
+All rights reserved.
+
+=cut
+
+use strict;
+use Getopt::Long;
+use Pod::Usage;
+use Time::Local;
+
+our $VERSION = "1.03";
+
+# vldb release flags
+use constant REL_NOT => 1;
+use constant REL_NEW => 2;
+use constant REL_OLD => 4;
+
+# command line options
+my $opt_help = 0;
+my $opt_level = 0;   # fastest, but least checks
+my $opt_verbose = 0;
+my $opt_cell = "";   # use local cell
+my $opt_version = 0;
+GetOptions(
+    "cell|c=s" => \$opt_cell,
+    "level=i" => \$opt_level,
+    "verbose|v" => \$opt_verbose,
+    "help|h|?" => \$opt_help,
+    "version" => \$opt_version,
+) or pod2usage(2);
+if ($opt_help) {
+    pod2usage(1);
+}
+if ($opt_version) {
+    print $VERSION, "\n";
+    exit(0);
+}
+
+exit main();
+
+#------------------------------------------------------------------
+# Main routine.
+#
+sub main
+{
+    my $vldb = vos_listvldb();
+    my $tx = cell_vos_status($vldb->{servers});
+    my $vols = cell_vos_listvol($vldb->{servers});
+
+    check_for_missing_volumes($vldb, $vols);
+    check_for_stray_volumes($vldb, $vols);
+    check_for_broken_volume_names($vldb, $vols);
+    check_for_missing_ro_clone_site($vldb);
+    check_for_stale_locks($vldb, $tx);
+    check_for_offline_volumes($vldb, $vols);
+    check_for_failed_releases($vldb);
+
+    return 0; # all checks ran
+}
+
+#------------------------------------------------------------------
+sub check_for_missing_volumes
+{
+    if ($opt_level < 1) {
+        info("skipping missing volumes checks.");
+        return;
+    }
+    info("checking for missing volumes ...");
+    my $vldb = shift;
+    my $vols = shift;
+    my $sv = sites_hash($vols->{list},  "server");
+    foreach my $site (@{ $vldb->{sites} }) {
+        my $key = site_key($site);
+        unless (exists($sv->{$key})) {
+            # Do not report sites which have not been released yet as missing.
+            unless ($site->{type} eq "RO" && $site->{flag}) {
+                fail("missing volume: $site->{name} ($site->{id}) at $site->{serv} $site->{part}");
+                $site->{missing} = 1;
+            }
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_stray_volumes
+{
+    if ($opt_level < 1) {
+        info("skipping stray volumes checks.");
+        return;
+    }
+    info("checking for stray volumes ...");
+    my $vldb = shift;
+    my $vols = shift;
+    my $db = sites_hash($vldb->{sites}, "vldb");
+    foreach my $site (@{ $vols->{list} }) {
+        my $key = site_key($site);
+        unless (exists($db->{$key})) {
+            # name is not available when vos listvol was
+            # run with the -fast option.
+            my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
+            fail("stray volume: $vol at $site->{serv} $site->{part}");
+            $site->{stray} = 1;
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_broken_volume_names
+{
+    if ($opt_level < 2) {
+        info("skipping volume names and types checks.");
+        return;
+    }
+    info("checking volume names and types ...");
+    my $vldb = shift;
+    my $vols = shift;
+    my $db = sites_hash($vldb->{sites}, "vldb");
+    foreach my $site (@{ $vols->{list} }) {
+        my $key = site_key($site);
+        if (exists($db->{$key})) {
+            my $v = $db->{$key};
+            if ($site->{name} && ($v->{name} ne $site->{name})) {
+                fail("name mismatch: $site->{name} ($site->{id}) ".
+                     "should be $v->{name} ".
+                     "at $site->{serv} $site->{part}");
+            }
+            if ($v->{type} ne $site->{type}) {
+                my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
+                fail("type mismatch: $vol ".
+                     "$site->{type} should be $v->{type} ".
+                     "at $site->{serv} $site->{part}");
+            }
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_stale_locks
+{
+    my $vldb = shift;
+    my $tx = shift;
+
+    info("checking for stale locks ...");
+    VOL: while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
+        next VOL unless $v->{locked};
+        info("checking volume lock: $v->{name} $id");
+        foreach my $type (qw(rw ro bk)) {
+            if ($v->{$type} && tx_lookup($tx, $v->{$type})) {
+                next VOL;
+            }
+        }
+        $v->{stalelock} = 1;
+        if ($v->{op}) {
+            fail("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
+        }
+        else {
+            fail("possible stale lock: $v->{name} ($v->{rw})");
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_failed_releases
+{
+    my $vldb = shift;
+
+    # check_for_stale_locks() must be run before this routine is called.
+    info("checking for failed releases ...");
+    while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
+        if ($v->{rflags}) {  # one or more vldb release flags were seen
+            info("release flags detected: $v->{name} $v->{rw}");
+            if ($v->{locked} && $v->{op} && $v->{op} eq 'release' && !$v->{stalelock}) {
+                info("release in progress: $v->{name} $v->{rw}");
+            }
+            elsif ($v->{rflags} == REL_NOT) {
+                fail("not released: $v->{name} $v->{rw}");
+            }
+            else {
+                fail("failed release: $v->{name} $v->{rw}");
+            }
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_missing_ro_clone_site
+{
+    my $vldb = shift;
+
+    info("checking for missing ro clone sites ...");
+    while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
+        my @ro = grep { $_->{type} eq "RO" } @{ $v->{sites} };
+        if (@ro) { # if there is at least one ro site
+            # get the rw site. (The presence of one rw site was
+            # checked when $vldb was created, so assert if missing.)
+            my ($rw) = grep { $_->{type} eq "RW" } @{ $v->{sites} };
+            die "vldb: missing read/write site: $v->{name} ($v->{rw})" unless $rw;
+
+            # Complain if the read-only clone entry is missing.
+            # Cross-device link errors are checked before this routine.
+            my $rc = grep {
+                $_->{serv} eq $rw->{serv} &&
+                $_->{part} eq $rw->{part}
+            } @ro;
+            unless ($rc) {
+                fail("addsite needed: $v->{name} ($v->{rw}) at ".
+                     "$rw->{serv} $rw->{part}");
+            }
+        }
+    }
+}
+
+#------------------------------------------------------------------
+sub check_for_offline_volumes
+{
+    my $vldb = shift;
+    my $vols = shift;
+
+    if ($opt_level < 2) {
+        info("skipping offline volume checks.");
+        return;
+    }
+
+    info("checking for offline volumes ...");
+    foreach my $site (@{ $vols->{list} }) {
+        if ($site->{status} ne "OK") {
+            my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
+            fail("volume offline: $vol at $site->{serv} $site->{part}");
+        }
+    }
+    foreach my $id (@{ $vols->{busy} }) {
+        my $v = vldb_lookup_entry($vldb, $id);
+        if ($v && $v->{locked} && !$v->{stalelock}) {
+            next;  # skip warning if a transaction is in progress
+        }
+        fail("volume busy: $id");
+    }
+    foreach my $id (@{ $vols->{unattached} }) {
+        fail("volume attach error: $id");
+    }
+}
+
+#------------------------------------------------------------------
+# Print an informational message when in verbose mode.
+#
+sub info
+{
+    if ($opt_verbose) {
+        my $msg = shift;
+        printf("info: %s\n", $msg);
+    }
+}
+
+#------------------------------------------------------------------
+# A check failed.
+#
+sub fail
+{
+    my $msg = shift;
+    print "WARNING: ". $msg ."\n";
+}
+
+#------------------------------------------------------------------
+# Validate an expression or exit with an error.
+#
+sub validate
+{
+    my $expr = shift;
+    my $msg = shift;
+    $expr or die $msg ."\n";
+}
+
+#------------------------------------------------------------------
+# Parse a date string formatted by ctime().
+#
+sub parse_date
+{
+    my $string = shift;
+    my $months = {"Jan"=>0, "Feb"=>1, "Mar"=>2, "Apr"=>3, "May"=>4, "Jun"=>5,
+                  "Jul"=>6, "Aug"=>7, "Sep"=>8, "Oct"=>9, "Nov"=>10, "Dec"=>11};
+
+    if ($string =~ /^(\d+)/) {
+        return $1; # assume all digits is a timestamp
+    }
+    if (my ($m, $day, $hour, $min, $sec, $year)=($string=~
+        /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/)) {
+        if (!exists($months->{$m})) {
+            die "parse_date: invalid month: $m";
+        }
+        my $time = timelocal($sec, $min, $hour, $day, $months->{$m}, $year);
+        return $time;
+    }
+    die "parse_date: invalid date string: $string";
+}
+
+#------------------------------------------------------------------
+# Create the volume name from the rw base name and volume type.
+#
+sub volname
+{
+    my ($name, $type) = @_;
+    if ($type =~ /^RO$/i) {
+        $name .= ".readonly";
+    }
+    elsif ($type =~ /^BK$/i) {
+        $name .= ".backup";
+    }
+    return $name;
+}
+
+#------------------------------------------------------------------
+# Add parent volume id hash entry.
+#
+sub vldb_add_parent_id
+{
+    my ($vldb, $parent, $id) = @_;
+
+    if (exists($vldb->{parents}->{$id})) {
+        unless ($vldb->{parents}->{$id} == $parent) {
+            warn("vldb: conflicting parent id numbers for volume $id");
+        }
+    }
+    else {
+        $vldb->{parents}->{$id} = $parent;
+    }
+}
+
+#------------------------------------------------------------------
+# Add a volume entry from the vos listvldb output.
+#
+sub vldb_add_entry
+{
+    my $vldb = shift;
+    my $v = shift;
+
+    # sanity checks
+    validate(exists($v->{name}),   "vldb: volume name missing");
+
+    my $name = $v->{name};
+    validate(exists($v->{rw}),     "vldb: read/write volume id missing: $name");
+
+    validate(exists($v->{sites}),  "vldb: sites missing: $name");
+    validate(exists($v->{nsites}), "vldb: number of sites missing: $name");
+
+    my $n = scalar(@{$v->{sites}});
+    validate($n > 0,               "vldb: no sites found: $name");
+    validate($n == $v->{nsites},   "vldb: not all sites found: $name");
+
+    my @rw = grep {$_->{type} eq "RW"} @{$v->{sites}};
+    validate(scalar(@rw) != 0, "vldb: no read/write site found: $name");
+    validate(scalar(@rw) == 1, "vldb: multiple read/write sites found: $name");
+
+    # Save the sites to the sites list and the servers to the servers list.
+    foreach my $s (@{ $v->{sites} }) {
+        push(@{ $vldb->{sites} }, $s);
+        $vldb->{servers}->{$s->{serv}} = 1;  # save as a key to generate a unique set
+    }
+    # Add the implied backup clone entry, if one.
+    if (exists($v->{bk})) {
+        my $r = $rw[0];  # the rw site, from the grep above
+        my $b = {serv=>$r->{serv}, part=>$r->{part}, parent=>$r->{parent},
+                 id=>$v->{bk}, type=>"BK", name=>volname($r->{name}, "BK") };
+        push(@{ $vldb->{sites} }, $b);
+    }
+
+    # Save the volume info by name and number.
+    my $id = $v->{rw};
+    if (exists($vldb->{names}->{$name})) {
+        warn("vldb: duplicate volume name: $name\n");
+    }
+    else {
+        $vldb->{names}->{$name} = $v;
+    }
+    if (exists($vldb->{numbers}->{$id})) {
+        warn("vldb: duplicate volume number: $id\n");
+    }
+    else {
+        $vldb->{numbers}->{$id} = $v;
+    }
+
+    # Save the parent id for each id in the volume group (including the rw)
+    foreach my $type (qw(rw ro bk rc)) {
+        if (exists($v->{$type})) {
+            vldb_add_parent_id($vldb, $id, $v->{$type});
+        }
+    }
+}
+
+#------------------------------------------------------------------
+# Lookup an entry by volume id.
+#
+sub vldb_lookup_entry
+{
+    my $vldb = shift;
+    my $id = shift;
+    my $v;
+
+    my $parent = $vldb->{parents}->{$id};
+    if ($parent) {
+        $v = $vldb->{numbers}->{$parent};
+    }
+    return $v;
+}
+
+#------------------------------------------------------------------
+# Run vos listvldb and read the output.
+#
+sub vos_listvldb
+{
+    my $vldb = {
+        names => {},     # hash of info by rw volume names
+        numbers => {},   # hash of info by rw volume numbers
+        parents => {},   # hash of parent id by volume id
+        sites => [],     # list of rw/ro/bk volume sites
+        servers => {},   # unique list of servers
+    };
+
+    my $options = "-quiet -noauth -noresolve -nosort";
+    if ($opt_cell) {
+        $options .= " -cell $opt_cell";
+    }
+    my $cmd = "vos listvldb $options";
+    info("running: ". $cmd);
+    open(my $vos, "$cmd |") or die "Failed to run $cmd: $!";
+
+    my $v;  # volume group
+    while (<$vos>) {
+        chomp;
+        next if /^\s*$/; # skip blank lines
+        if (/^(\S+)\s*$/) {
+            if (!defined($v)) { # first entry
+                $v = {};
+            }
+            if (exists($v->{name})) {
+                vldb_add_entry($vldb, $v);
+            }
+            $v = {name=>$1, sites=>[], locked=>0};
+            next;
+        }
+        unless (defined($v) && exists($v->{name})) {
+            die "vldb: error reading listvldb";
+        }
+        if (/^\s+(RWrite|ROnly|Backup|RClone):/) {
+            if (/RWrite:\s+(\d+)/) {
+                $v->{rw} = $1;
+            }
+            if (/ROnly:\s+(\d+)/) {
+                $v->{ro} = $1;
+            }
+            if (/Backup:\s+(\d+)/) {
+                $v->{bk} = $1;
+            }
+            if (/RClone:\s+(\d+)/) {
+                $v->{rc} = $1;
+            }
+            next;
+        }
+        if (/^\s+number of sites -> (\d+)/) {
+            $v->{nsites} = $1;
+            next;
+        }
+        if (m{^\s+server (\S+) partition /vicep(\w+) (\w+) Site}) {
+            my ($server, $part, $type) = ($1, $2, $3);
+            my $parent = $v->{rw};
+            my $id;
+            my $flag;
+
+            if (/-- Not released/) {
+                $flag = REL_NOT;
+            }
+            elsif (/-- New release/) {
+                $flag = REL_NEW;
+            }
+            elsif (/-- Old release/) {
+                $flag = REL_OLD;
+            }
+
+            if ($type eq "RW") {
+                $id = $v->{rw};
+            }
+            elsif ($type eq "RO") {
+                if (defined($v->{ro})) {
+                    $id = $v->{ro};
+                }
+                elsif ($flag eq REL_NOT) {
+                    $id = 0; # ro volume not created yet
+                }
+                else {
+                    die "vldb: error reading listvldb: ro id not found: $v->{name}";
+                }
+            }
+            else {
+                die "vldb: error reading listvldb: unexpected volume type: $v->{name}";
+            }
+            my $vs = {serv=>$server, part=>$part, parent=>$parent,
+                      id=>$id, type=>$type, name=>volname($v->{name}, $type)};
+            if ($flag) {
+                $v->{rflags} |= $flag;
+                $vs->{flag} = $flag;
+            }
+            push(@{$v->{sites}}, $vs);
+            next;
+        }
+        if (/^\s+Volume is currently LOCKED/) {
+            $v->{locked} = 1;
+            next;
+        }
+        if (/^\s+Volume is locked for a (\S+) operation/) {
+            $v->{op} = $1;
+            next;
+        }
+    }
+    if (exists($v->{name})) {
+        vldb_add_entry($vldb, $v);
+    }
+    $vldb->{servers} = [keys(%{ $vldb->{servers} })];
+    close($vos);
+    unless ($? == 0) {
+        die "error: $cmd: code=$?";
+    }
+    return $vldb;
+}
+
+#------------------------------------------------------------------
+# Run vos listvol for a server and read the output.
+#
+# Use the -fast option to get just the volume id list. This is a
+# much lighter weight operation on the fileserver.
+#
+sub vos_listvol
+{
+    my $vol = shift;
+    my $server = shift;
+
+    my $options = "-server $server -noauth -noresolve";
+    if ($opt_level < 2) {
+        $options .= " -fast";
+    }
+    else {
+        $options .= " -format";
+    }
+    if ($opt_cell) {
+        $options .= " -cell $opt_cell";
+    }
+    my $cmd = "vos listvol $options";
+    info("running: ". $cmd);
+    open(my $vos, "$cmd |") or die "Failed to run $cmd: $!";
+
+    my $state = 0;
+    my $v;
+    my $part;  # current partition
+    while(<$vos>) {
+        chomp;
+        next if /^\s*$/;                  # skip blank lines
+        next if /^Total volumes/;         # skip summary lines
+        if (m{Total number of volumes on server (\S+) partition /vicep(\w+)}) {
+            $part = $2;
+            next;
+        }
+        if (/\*\*\*\* Volume (\d+) is busy \*\*\*\*/) {
+            push(@{ $vol->{busy} }, $1);
+            next;
+        }
+        if (/\*\*\*\* Could not attach volume (\d+) \*\*\*\*/) {
+            push(@{ $vol->{unattached} }, $1);
+            next;
+        }
+        if ($opt_level < 2) {
+            if (/^(\d+)\s*$/) {
+                my $v = {serv=>$server, part=>$part, id=>$1};
+                push(@{ $vol->{list} }, $v);
+            }
+            next;
+        }
+
+        if ($state == 0) {
+            if (/^BEGIN_OF_ENTRY/) {
+                $state = 1;
+                $v = {};
+                next;
+            }
+        }
+        if ($state == 1) {
+            if (/^END_OF_ENTRY/) {
+                push(@{ $vol->{list} }, $v);
+                $state = 0;
+                next;
+            }
+            if (/^(name|id|type|serv|status|parentID|needsSalvaged|destroyMe)\s+(\S+)/) {
+                $v->{$1} = $2;
+                next;
+            }
+            if (m{^part\s+/vicep(\w+)}) {
+                $v->{part} = $1;
+            }
+            next;
+        }
+        die "vol: error reading listvol for server $server: $_";
+    }
+    close($vos);
+    unless ($? == 0) {
+        die "error: $cmd: code=$?";
+    }
+}
+
+#------------------------------------------------------------------
+# Run vos listvol for each file server.
+#
+sub cell_vos_listvol
+{
+    my $servers = shift;
+    my $vol = {
+        list => [],
+        busy => [],
+        unattached => [],
+    };
+    if ($opt_level < 1) {
+        return undef;
+    }
+    foreach my $server (@{ $servers }) {
+        vos_listvol($vol, $server);
+    }
+    return $vol;
+}
+
+#------------------------------------------------------------------
+# Lookup volume transactions by id and proc.
+#
+sub tx_lookup
+{
+    my ($tx, $id, $proc) = @_;  # proc is optional
+    my @t;
+    if ($proc) {
+        @t = grep {$_->{id} eq $id && $_->{proc} eq $proc} @{ $tx->{list} };
+    }
+    else {
+        @t = grep {$_->{id} eq $id} @{ $tx->{list} };
+    }
+    return @t; # return the matching list
+}
+
+#------------------------------------------------------------------
+# Run vos status and read the output.
+#
+sub vos_status
+{
+    my $tx = shift;
+    my $server = shift;
+
+    my $options = "-server $server -noauth -noresolve";
+    if ($opt_cell) {
+        $options .= " -cell $opt_cell";
+    }
+    my $cmd = "vos status $options";
+    info("running: ". $cmd);
+    open(my $vos, "$cmd |") or die "Failed to run $cmd: $!";
+    my ($state, $total, $count, $t) = (0, 0, 0, undef);
+    while(<$vos>) {
+        chomp;
+        next if /^\s*$/;  # skip blank lines
+        if ($state == 0) {
+            last if /^No active transactions on/;
+            if (/^Total transactions: (\d+)/) {
+                $total = $1;
+            }
+            if (/^------/) {
+                $t = {server=>$server};
+                $state = 1;
+            }
+            next;
+        }
+        if ($state == 1) {
+            if (/transaction: (\d+)/) {
+                $t->{tid} = $1;
+            }
+            if (/created: (.+)$/) {
+                $t->{created} = parse_date($1);
+            }
+            if (/lastActiveTime: (.+)$/) {
+                $t->{last} = parse_date($1);
+            }
+            if (/volume: (\d+)/) {
+                $t->{id} = $1;
+            }
+            if (m{partition: /vicep(\S+)}) {
+                $t->{part} = $1;
+            }
+            if (/procedure: (\S+)/) {
+                $t->{proc} = $1;
+            }
+            if (/packetRead: (\d+)/) {
+                $t->{read} = $1;
+            }
+            if (/packetSend: (\d+)/) {
+                $t->{send} = $1;
+            }
+            if (/lastReceiveTime: (.+)$/) {
+                $t->{recvtime} = parse_date($1);
+            }
+            if (/lastSendTime: (.+)$/) {
+                $t->{sendtime} = parse_date($1);
+            }
+            if (/^------/) {
+                push(@{ $tx->{list} }, $t);
+                $count++;
+                $state = 0;
+            }
+            next;
+        }
+    }
+    close($vos);
+    unless ($? == 0) {
+        die "error: $cmd: code=$?";
+    }
+    if ($total != $count) {
+        die "failed to read all of the transactions from vos status.";
+    }
+}
+
+#------------------------------------------------------------------
+# Run vos status for each file server.
+#
+sub cell_vos_status
+{
+    my $servers = shift;
+    my $tx = {list => []};
+    foreach my $server (@{ $servers }) {
+        vos_status($tx, $server);
+    }
+    return $tx;
+}
+
+#------------------------------------------------------------------
+# Create a tuple of the volume id and location.
+#
+sub site_key
+{
+    my $site = shift;
+    return sprintf("%s:%s:%d", $site->{serv}, $site->{part}, $site->{id});
+}
+
+#------------------------------------------------------------------
+# Create a hash table of volume sites.
+#
+sub sites_hash
+{
+    my $sites = shift;
+    my $source = shift;
+    my $hash = {};
+
+    foreach my $site (@{ $sites }) {
+        my $key = site_key($site);
+        if (exists($hash->{$key})) {
+            unless ($hash->{$key}->{dupwarn}) {
+                fail("$source: duplicate volume detected: $key");
+                $hash->{$key}->{dupwarn} = 1;
+            }
+        }
+        else {
+            $hash->{$key} = $site;
+        }
+    }
+    return $hash;
+}
+
+
