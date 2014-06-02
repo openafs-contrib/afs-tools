@@ -110,7 +110,7 @@ printf "filesize %u\nrecords %u\n", $filesize, $nrecords;
 if (defined($index)) {
 
     my $off = $fheader_size + $dataSize * $index;
-    print "offset $off\n";
+    print "offset $off, index $index\n";
 
     my $code;
     $code = seek(CACHEITEMS, $off, 0)
