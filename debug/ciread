@@ -145,8 +145,8 @@ if (defined($index)) {
 
     printf "\tfid: %u.%u.%u.%u\n",
            $cell, $vol, $vnode, $uniq;
-    printf "\tmodtime: %u\n",
-           $modtime;
+    printf "\tmodtime: %u (%s)\n",
+           $modtime, scalar(localtime($modtime));
     printf "\tversionNo: %u, %u\n",
            $versionNo_hi, $versionNo_lo;
     printf "\tchunk: %u\n",
