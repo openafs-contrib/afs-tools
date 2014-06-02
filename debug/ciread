@@ -141,10 +141,23 @@ if (defined($index)) {
         $inode = sprintf("%lu", $inode);
     }
 
-    printf "fcache {\n\tfid: %u.%u.%u.%u\n\tmodtime: %u\n\tversionNo: %u, %u\n"
-      . "\tchunk: %u\n\tinode: %s\n\tchunkBytes: %u\n\tstates: 0x%x\n}\n",
-      $cell, $vol, $vnode, $uniq, $modtime, $versionNo_hi, $versionNo_lo,
-      $chunk,
-      $inode, $chunkBytes, $states;
+    printf "fcache {\n";
+
+    printf "\tfid: %u.%u.%u.%u\n",
+           $cell, $vol, $vnode, $uniq;
+    printf "\tmodtime: %u\n",
+           $modtime;
+    printf "\tversionNo: %u, %u\n",
+           $versionNo_hi, $versionNo_lo;
+    printf "\tchunk: %u\n",
+           $chunk;
+    printf "\tinode: %s\n",
+           $inode;
+    printf "\tchunkBytes: %u\n",
+           $chunkBytes;
+    printf "\tstates: 0x%x\n",
+           $states;
+
+    printf "}\n";
 
 }
