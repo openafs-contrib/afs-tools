@@ -1,0 +1,1607 @@
+#!/usr/bin/perl
+#
+# Copyright (c) 2013, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+=head1 NAME
+
+afs-client-accessd - collect and aggregate AFS client access data
+
+=head1 SYNOPSIS
+
+B<afs-client-accessd>
+    B<--config> <I<afs-client-accessd.conf>>
+    B<--mode> <I<export mode>>
+    [B<--check>]
+    [B<--no-auditlog>]
+
+=head1 DESCRIPTION
+
+B<afs-client-accessd> is used to collect and aggregate access information from
+an OpenAFS System V message queue based audit log. The data it collects
+answers the question "did host H access volume V on fileserver F on day D?"
+
+The B<afs-client-accessd> script collects this information from an OpenAFS
+fileserver running on the same host, and then uploads this information every
+day to an Oracle database. If an instance of this script is run on each
+fileserver in the cell, you can then have an easily-queryable database of what
+hosts are accessing what volumes.
+
+In order to capture this information, the fileserver on the local host must be
+started with the C<-audit-interface sysvmq> option in addition to C<-auditlog>.
+
+Logging is handled by syslog using the configured facility. Any errors
+encountered before the log has been opened are reported to stderr, and we will
+exit with non-zero status immediately afterwards.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<--config> <I<afs-client-accessd.conf>>
+
+This specifies the path to the configuration file we should use. This option
+is required. Configuration directives that go in this file are described in
+CONFIGURATION below.
+
+=item B<--mode> <I<export mode>>
+
+This specifies how we transmit our collected host data. B<afs-client-accessd>
+currently understands the following export modes:
+
+=over 4
+
+=item oracle
+
+In this export mode, we push the data in our local database files to the
+configured Oracle database, using the ORACLE_* options in the configuration.
+
+=item ssh
+
+In this export mode, we transfer the local database files to a central host
+using ssh-based commands, using the SSH_* options in the configuration.
+
+=item internal-recv
+
+This is used internally by B<afs-client-accessd> when transferring files via
+ssh. You should never need to specify this.
+
+=back
+
+This can be useful if you only have one host that is capable of pushing data to
+the configured Oracle database, but you can transfer the database files from
+all of the hosts to that one central host via ssh. For instance, on the one
+host that can push to Oracle, you specify "--mode oracle", and on all other
+hosts, you specify "--mode ssh". In such situations, it is strongly recommended
+that the C<afs-client-accessd.conf> configuration file is still identical on
+all hosts, and the various B<afs-client-accessd> processes only differ in their
+command-line arguments.
+
+=item B<--check>
+
+Instead of collecting access information, just check if we can connect to the
+configured Oracle database. If we can, exit with success; otherwise, we print
+an error message to stderr and exit with non-zero status.
+
+This is useful when trying to try out different Oracle connection information,
+since otherwise we normally don't try to connect to Oracle on startup.
+
+=item B<--no-auditlog>
+
+Do not process audit log messages from the fileserver, and do not generate any
+additional local sqlite database files. Instead, all we do is look for database
+files, and export them via ssh or via Oracle, according to our "export mode"
+specified by B<--mode>.
+
+This can be useful if you have all of your fileservers set up to export access
+data via ssh to a central host. Then, that central host just exports data to
+Oracle, and does no local auditlog processing of its own. In such a scenario,
+the Oracle host would have B<--no-auditlog> specified.
+
+=back
+
+=head1 CONFIGURATION
+
+Comments in the configuration file are specified via the # symbol (the
+octothorpe, or "hash"). Specifying individual directives is specified like
+so:
+
+  ORACLE_USER => 'username',
+
+Strings must be quoted, and that trailing comma is mandatory. In some cases,
+some constants are allowed that do not need to be quoted; these are mentioned
+below alongside their appropriate configuration directive.
+
+Some configuration directives are mandatory, some have defaults if they are not
+specified, and some are optional. Some directives can be changed while
+B<afs-client-accessd> is running (see SIGNALS to see how to read a new config
+file), and others may not change once we have started.
+
+The following configuration directives are recognized:
+
+=over 4
+
+=item LOG_FACILITY
+
+This specifies what syslog facility to use. Defaults to LOG_DAEMON. This
+directive may NOT be changed while B<afs-client-accessd> is running.
+
+The values that can be specified for this directive are symbolic constants and
+not strings, so do not quote them. Any syslog facility constants defined for
+the running system are allowed (e.g. LOG_AUTH, LOG_USER).
+
+Example:
+
+  LOG_FACILITY => LOG_LOCAL0,
+
+=item AUDIT_PATH
+
+This specifies the path to the System V message queue for the fileserver's
+audit log. This directive must match the C<-auditlog> parameter given to the
+fileserver. There is no default for this option, and it must be specified.
+This option may NOT be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  AUDIT_PATH => '/usr/afs/logs/FileAudit',
+
+=item SQLITE_PREFIX
+
+This specifies the directory in which the local disk databases will be stored
+before they are exported to the central database store. Defaults to
+"/usr/afs/logs/accessdb". B<afs-client-accessd> will bail out on startup if
+this directory does not exist. This option may NOT be changed while
+B<afs-client-accessd> is running.
+
+This path should point to disk that is relatively fast to ensure we don't lose
+audit messages from the fileserver. It should also be large enough to hold a
+few days worth of local disk records. This is because, while ideally we only
+hold about 1 or 2 days worth of records there, if there are any errors with
+exporting the data to the central Oracle database, the local disk databases
+will keep accumulating until we can export them to Oracle again.
+
+Example:
+
+  SQLITE_PREFIX => '/var/afs-accessdb',
+
+=item SSH_BINARY
+
+This specifies the command to run for the "ssh" command, which is used when
+transferring database files to the central ssh host in the "ssh" export mode.
+This can be an absolute path to an "ssh" binary or wrapper script.
+
+The default value is just "ssh". This option can be changed while
+B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_BINARY => '/usr/local/bin/ssh',
+
+=item SSH_USER
+
+This specifies what username to use when exporting the local databases to a
+central host via ssh in the "ssh" export mode. By default, this is the value of
+the USER environment variable. This option can be changed while
+B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_USER => 'afsaccessdb',
+
+=item SSH_HOST
+
+This specifies the host we connect to for the "ssh" export mode. You can
+specify any name that is understood by B<ssh> (either a hostname that can be
+resolved, or a name that is recognized in the local F<ssh_config>).
+
+B<afs-client-accessd> must be able to connect to this host via ssh without a
+password. This can be done via ssh public key authentication (see B<SSH_KEY>
+below), GSSAPI authentication, or other methods.
+
+This option is required for the "ssh" export mode, and has no default. This
+option can be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_HOST => 'central-host.example.com',
+
+=item SSH_KEY
+
+This specifies the path to an ssh private key, for use with the "ssh" export
+mode. If specified, B<afs-client-accessd> will use the specified private key
+file when connecting to SSH_HOST. If this is not specified, the default
+behavior is the default behavior of ssh, which is to try to the keys
+~/.ssh/id_rsa and ~/.ssh/id_dsa, if they exist.
+
+This option is optional, and has no default value. This option can be changed
+while B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_KEY => '/srv/afs-client-accessd/id_rsa.afsaccess',
+
+=item SSH_REMOTE_ACA
+
+This specifies the command to run on remote machines for the "ssh" export mode.
+This must be a command that when run on a remote machine, executes the
+B<afs-client-accessd> program. It can either be a full path to
+B<afs-client-accessd>, or the name of a command in the PATH, or a wrapper,
+etc.
+
+The default value is just "afs-client-accessd". This option can be changed
+while B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_REMOTE_ACA => '/usr/local/bin/afs-client-accessd',
+
+=item SSH_XFER_CMD
+
+This specifies the command to run in order to export a database from local disk
+to the central ssh host, in the "ssh" export mode. You probably do not need to
+change the value of this option. This option can be used to change what command
+we use to transfer the files; it does not necessarily even need to be
+ssh-based.
+
+The string specified here is not taken literally, but instead many
+substitutions for various values are performed. See the section on L<SSH
+COMMAND SUBSTITUION> below for what substitutions are performed.
+
+The default value of this option is:
+
+  '%{SSH_BINARY} %{SSH_OPTIONS} %{SSH_USER}@%{SSH_HOST} -- %{SSH_REMOTE_CMD}'
+
+This option can be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  SSH_XFER_CMD => 'rsh -l %{SSH_USER} %{SSH_HOST} %{SSH_REMOTE_CMD}',
+
+=item ORACLE_HOME
+
+This specifies the ORACLE_HOME variable used for the Oracle client driver.
+B<afs-client-accessd> will attempt to set the various Oracle environment
+variables according to this value (ORACLE_HOME, and LD_LIBRARY_PATH), if they
+are not already set when B<afs-client-accessd> is started.
+
+This option has no default, and is mandatory for the "oracle" export mode. This
+option may NOT be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  ORACLE_HOME => '/u01/app/oracle/foo',
+
+=item ORACLE_DSN
+
+This specifies the connection information used when exporting data to the
+central Oracle database. If you know your "service name", just specify the
+service name by itself. If instead you want to specify the host, port, and
+SID to connect to, you can specify those in the form:
+
+  "host=$host;port=$port;sid=$sid"
+
+Or you can use an EZCONNECT url, of the form:
+
+  "//$host:$port/$servicename"
+
+Keep in mind that "SID" and "service name" are not always the same thing. For
+more details on what can be specified, see the perl DBD::Oracle documentation
+on the "connect" method. When we connect to Oracle, we basically call:
+
+  $dbh = DBI->connect("dbi:Oracle:$ORACLE_DSN", $user, $pass);
+
+This option is required for the "oracle" export mode, and has no default. This
+option can be changed while B<afs-client-accessd> is running.
+
+Examples:
+
+  ORACLE_DSN => 'myservice',
+  ORACLE_DSN => 'host=oracle.example.com;port=1522;sid=MYSID',
+  ORACLE_DSN => '//oracle.example.com/servicename',
+
+=item ORACLE_USER
+
+This specifies the username to use when we export data to the central Oracle
+database. It's also possible to specify the database and password in this
+field, but it's probably less confusing to leave those to the ORACLE_DSN and
+ORACLE_PASSWORD directives.
+
+This option is required for the "oracle" export mode, and has no default. This
+option can be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  ORACLE_USER => 'scott',
+
+=item ORACLE_PASSWORD
+
+This specifies the password to use when we export data to the central Oracle
+database. This option is required for the "oracle" export mode, and has no
+default. This option can be changed while B<afs-client-accessd> is running.
+
+Example:
+
+  ORACLE_PASSWORD => 'tiger',
+
+=item ORACLE_TABLE
+
+This specifies the table name to use when we export data to the central Oracle
+database. Defaults to "accesses". This table must exist before we can export
+data to the Oracle database. This option can be changed while
+B<afs-client-accessd> is running.
+
+Example:
+
+  ORACLE_TABLE => 'afsclientaccesses',
+
+=back
+
+=head1 SSH COMMAND SUBSTITUTION
+
+For the SSH_XFER_CMD configuration directive, the specified string is not used
+literally, but instead many substitutions for various values are performed. Any
+part of the string that is of the form %{VAR} will be replaced by the value of
+the variable VAR. These variables are not the other configuration directives
+and are not arbitrary Perl code; they are variables specifically used for the
+substitution described here.
+
+The following are the various variables that are substituted:
+
+=over 4
+
+=item SSH_BINARY
+
+This is the same as the SSH_BINARY configuration directive.
+
+=item SSH_HOST
+
+This is the same as the SSH_HOST configuration directive.
+
+=item SSH_OPTIONS
+
+This expands to any ssh command-line options we need to specify. Currently,
+this is the empty string, unless you specified the SSH_KEY configuration
+directive. If you specified the SSH_KEY configuration directive, this expands
+to "-i /path/to/ssh-key".
+
+=item SSH_USER
+
+This is the same as the SSH_USER configuration directive.
+
+=item SSH_REMOTE_CMD
+
+This is the command to run on the remote machine. B<afs-client-accessd>
+calculates this internally; it will generally be an invocation of
+B<afs-client-accessd> on the remote machine with some additional arguments.
+
+=back
+
+=head1 SIGNALS
+
+Sending B<afs-client-accessd> a HUP signal will cause the configuration file
+to be re-read. If there are errors in reading the config file or parsing it,
+we will fall back to the old values and ignore the new file (and log an error).
+
+The signals INT, TERM, and QUIT all cause B<afs-client-accessd> to exit
+gracefully. The current accesses getting processed with be saved to disk, and
+will be read again on startup, if we are started during the same day.
+
+On a nongraceful shutdown (SIGKILL, machine crash, etc), the accesses for the
+current day are lost.
+
+=head1 SEE ALSO
+
+L<fileserver(8)>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2013, Sine Nomine Associates
+
+=cut
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use IPC::SysV qw(S_IRUSR ftok);
+use POSIX qw(pause strftime WNOHANG WIFSIGNALED WTERMSIG WIFEXITED WEXITSTATUS);
+use Sys::Syslog qw(openlog syslog);
+use File::stat;
+use Fcntl qw(O_WRONLY O_CREAT O_EXCL);
+use Text::ParseWords;
+use Sys::Hostname;
+use DBI qw(:sql_types);
+use DBD::SQLite;
+# do not 'use DBD::Oracle'; we will "require" it below, after we've ensured
+# our env vars are set correctly
+
+#
+# constants
+#
+
+# set to 1 to enable debug logging
+use constant DEBUG => 0;
+
+# check for db rotation about once every ALARM_INTERVAL seconds
+use constant ALARM_INTERVAL => 600; # 10 minutes
+
+# e.g. access_20130311.sqlite for the data for Mar 11, 2013
+use constant TIMESTR => '%Y%m%d';
+
+# commit data to the oracle db ROW_BATCHSIZE rows at a time
+use constant ROW_BATCHSIZE => 1024;
+
+# syslog constants; older perls (5.8.0) don't export these from the syslog
+# module, and we're supposed to pass strings to syslog functions instead
+use constant LOG_ERR      => 'LOG_ERR';
+use constant LOG_INFO     => 'LOG_INFO';
+use constant LOG_DEBUG    => 'LOG_DEBUG';
+use constant LOG_AUTH     => 'LOG_AUTH';
+use constant LOG_AUTHPRIV => 'LOG_AUTHPRIV';
+use constant LOG_CRON     => 'LOG_CRON';
+use constant LOG_DAEMON   => 'LOG_DAEMON';
+use constant LOG_FTP      => 'LOG_FTP';
+use constant LOG_USER     => 'LOG_USER';
+use constant LOG_LOCAL0   => 'LOG_LOCAL0';
+use constant LOG_LOCAL1   => 'LOG_LOCAL1';
+use constant LOG_LOCAL2   => 'LOG_LOCAL2';
+use constant LOG_LOCAL3   => 'LOG_LOCAL3';
+use constant LOG_LOCAL4   => 'LOG_LOCAL4';
+use constant LOG_LOCAL5   => 'LOG_LOCAL5';
+use constant LOG_LOCAL6   => 'LOG_LOCAL6';
+use constant LOG_LOCAL7   => 'LOG_LOCAL7';
+
+#
+# globals
+#
+
+# what filename should the current results be written to?
+my $CUR_DBNAME;
+
+# database 'statement handle' for collecting accesses
+my $COLLECT_STH;
+
+# filename for the temporary sqlite database we write to as we're recording data
+my $SQLITE_TEMP;
+
+# pid for the active 'exporter' process for writing to Oracle; 0 if none
+my $EXPORTER_PID = 0;
+
+# whether we export data via Oracle or ssh
+my $EXPORT_MODE;
+
+# whether we are processing audit logs from the fileserver
+my $AUDIT_ENABLED = 1;
+
+# path to our config file
+my $CONFIG_FILE;
+
+# config data
+my %CFG;
+
+# remember our original argv if we need to re-exec ourselves
+my @ORIGINAL_ARGV;
+
+my $SIGNAL_SHUTDOWN = 0;
+my $SIGNAL_CONFIG = 0;
+my $SIGNAL_CHILD = 0;
+my $SIGNALLED = 0;
+
+#
+# logging
+#
+
+sub
+_log($$)
+{
+	my ($level, $msg) = @_;
+	for (grep(/\S/, split(/\n/, $msg))) {
+		syslog($level, $_);
+	}
+}
+sub
+verr($)
+{
+	my ($msg) = @_;
+	_log(LOG_ERR, $msg);
+}
+sub
+vlog($)
+{
+	my ($msg) = @_;
+	_log(LOG_INFO, $msg);
+}
+sub
+d($)
+{
+	if (DEBUG) {
+		my ($msg) = @_;
+		#print "$msg\n";
+		_log(LOG_DEBUG, $msg);
+	}
+}
+
+#
+# config
+#
+sub
+read_config()
+{
+	# defaults
+	my %newcfg = (
+		LOG_FACILITY => LOG_DAEMON,
+		SQLITE_PREFIX => '/usr/afs/logs/accessdb',
+
+		ORACLE_TABLE => 'accesses',
+		# the rest of the ORACLE_* directives have no defaults
+
+		SSH_BINARY => 'ssh',
+		SSH_REMOTE_ACA => 'afs-client-accessd',
+		SSH_USER => $ENV{USER},
+
+		SSH_XFER_CMD => '%{SSH_BINARY} %{SSH_OPTIONS} %{SSH_USER}@%{SSH_HOST} -- %{SSH_REMOTE_CMD}',
+		# the rest of the SSH_* directives have no defaults
+	);
+
+	if (!-r $CONFIG_FILE) {
+		die("Cannot read config file $CONFIG_FILE\n");
+	}
+
+	# read in and parse the actual config file; it's just a perl file
+	my %override = do($CONFIG_FILE);
+	if (!%override) {
+		if ($@) {
+			die("Error parsing config $CONFIG_FILE: $@\n");
+		}
+		die("Error reading config $CONFIG_FILE: $!\n");
+	}
+
+	# override the defaults with our new values
+	for (keys %override) {
+		$newcfg{$_} = $override{$_};
+	}
+
+	my $err = '';
+	if (! -d $newcfg{SQLITE_PREFIX}) {
+		$err .= "SQLITE_PREFIX dir $newcfg{SQLITE_PREFIX} does not exist\n";
+	}
+
+	# these cannot change
+	for (qw(LOG_FACILITY AUDIT_PATH SQLITE_PREFIX ORACLE_HOME)) {
+		if (defined($CFG{$_}) and $CFG{$_} ne $newcfg{$_}) {
+			$err .= "$_ cannot be changed while afs-client-accessd is running:\n".
+			        "you must restart afs-client-accessd to change it\n";
+		}
+	}
+
+	# these are mandatory and have no defaults
+	for (qw(AUDIT_PATH)) {
+		if (!defined($newcfg{$_})) {
+			$err .= "$_ not specified\n";
+		}
+	}
+	# mandatory for "oracle" export mode only
+	if ($EXPORT_MODE eq "oracle") {
+		for (qw(ORACLE_HOME ORACLE_DSN ORACLE_USER ORACLE_PASSWORD)) {
+			if (!defined($newcfg{$_})) {
+				$err .= "$_ not specified\n";
+			}
+		}
+	}
+	# mandatory for "ssh" export mode only
+	if ($EXPORT_MODE eq "ssh") {
+		for (qw(SSH_HOST)) {
+			if (!defined($newcfg{$_})) {
+				$err .= "$_ not specified\n";
+			}
+		}
+	}
+
+	# we got some errors; can't use this config file
+	if ($err) {
+		die("Error processing config $CONFIG_FILE:\n$err");
+	}
+
+	# make the new config directives visible in the %CFG hash
+	%CFG = %newcfg;
+
+	$SQLITE_TEMP = "$CFG{SQLITE_PREFIX}/accesstmp.sqlite";
+}
+
+#
+# compat
+#
+
+# GetOptionsFromString is not portable enough, so here we have our own. Not
+# sure if this handles all of the same cases, but it seems to work well enough
+# for now.
+sub
+GetOptionsFromString($@)
+{
+	my ($str, @opts) = @_;
+
+	my @argv = shellwords($str);
+	my @orig_argv = @ARGV;
+	@ARGV = @argv;
+
+	my $ret = GetOptions(@opts);
+
+	@argv = @ARGV;
+	@ARGV = @orig_argv;
+
+	return ($ret, \@argv);
+}
+
+#
+# code for actual processing
+#
+
+# get the database filename we should use, according to the current time
+sub
+get_dbname()
+{
+	my $str = strftime "$CFG{SQLITE_PREFIX}/access_".TIMESTR.".sqlite", localtime;
+	return $str;
+}
+
+# open the database, and prepare it for use
+sub
+sqlite_dbopen($)
+{
+	my ($filename) = @_;
+	my $dbh = DBI->connect("dbi:SQLite:dbname=$filename",
+	                       '', # username
+	                       '', # password
+	                       { AutoCommit => 0, RaiseError => 1 }
+	) or die("Error opening sqlite db $filename: $DBI::errstr\n");
+	return $dbh;
+}
+
+# sets $COLLECT_STH, which is our "statement handle" for inserting stuff into
+# the local sqlite database
+sub
+start_collection()
+{
+	if (!$AUDIT_ENABLED) {
+		return;
+	}
+
+	my $dbh = sqlite_dbopen($SQLITE_TEMP);
+	$dbh->do('PRAGMA synchronous = OFF');
+	$dbh->do('PRAGMA journal_mode = OFF');
+
+	# This is effectively "CREATE TABLE IF NOT EXISTS ...", but that is new to
+	# sqlite 3.3, which we cannot assume we have. Instead query the
+	# sqlite_master table to see if the table already exists, which should work
+	# with all known current sqlite versions.
+
+	my @count = $dbh->selectrow_array("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='access'");
+	if ($count[0] == 0) {
+		$dbh->do('CREATE TABLE access (host INTEGER, volid INTEGER, PRIMARY KEY (host, volid) ON CONFLICT IGNORE)');
+
+	} elsif ($count[0] != 1) {
+		die "Weird count from sqlite_master query (got ".($count[0]).", expected 1)";
+	}
+
+	my $sth = $dbh->prepare('INSERT INTO access (host, volid) VALUES (?,?)');
+	$COLLECT_STH = $sth;
+}
+
+# Commit all data to the current database, and close the database.
+# If $next_dbname is set, we're closing the db just to rotate the results, and
+# the next results are going to go in $next_dbname. If $next_dbname is not set,
+# we're just saving the current results and we're not going to continue saving
+# results.
+sub
+stop_collection($)
+{
+	my $next_dbname = $_[0];
+
+	if (!$AUDIT_ENABLED) {
+		return;
+	}
+
+	my $sth = $COLLECT_STH;
+	my $dbh = $sth->{Database};
+
+	if (!$next_dbname) {
+		vlog("Saving current results in $CUR_DBNAME");
+	}
+
+	# make sure we don't accidentally overwrite something
+	if (-e $CUR_DBNAME) {
+		die("We were supposed to dump a daily database $CUR_DBNAME, but it already exists\n");
+	}
+
+	$COLLECT_STH = undef;
+
+	$dbh->commit();
+	$dbh->disconnect();
+
+	my $st = stat($SQLITE_TEMP)
+		or die("stat $SQLITE_TEMP: $!");
+
+	# now that the database contents are valid, save the database to the
+	# current non-temporary filename
+
+	rename($SQLITE_TEMP, $CUR_DBNAME)
+		or die("Cannot rename $SQLITE_TEMP to $CUR_DBNAME: $!");
+
+	if ($next_dbname) {
+		vlog("Rotated ".($st->size)." bytes to $CUR_DBNAME; next results will go in $next_dbname");
+	}
+}
+
+# signal handlers
+# just set some flags when we get a signal, and we can check them during the
+# main loop
+sub
+sigint
+{
+	$SIGNALLED = 1;
+	$SIGNAL_SHUTDOWN = 1;
+}
+sub
+sigalrm
+{
+	$SIGNALLED = 1;
+}
+sub
+sigchld
+{
+	$SIGNALLED = 1;
+	$SIGNAL_CHILD = 1;
+}
+sub
+sighup
+{
+	$SIGNALLED = 1;
+	$SIGNAL_CONFIG = 1;
+}
+
+# open a connection to the configured Oracle database
+sub
+oracle_dbopen()
+{
+	my $dsn = 'dbi:Oracle:'.$CFG{ORACLE_DSN};
+
+	my $dbh = DBI->connect($dsn, $CFG{ORACLE_USER}, $CFG{ORACLE_PASSWORD},
+	                       { AutoCommit => 0, RaiseError => 1}
+	) or die("Error connecting to $dsn, user $CFG{ORACLE_USER}: $DBI::errstr\n");
+
+	return $dbh;
+}
+
+# Export a single database to Oracle
+sub
+oracle_export_db($$$$$)
+{
+	my ($oracle_dbh, $sqlite_dbh, $hostname, $path, $timestr) = @_;
+
+	# did we encounter some non-fatal errors?
+	my $fail = 0;
+
+	vlog("Exporting database $path to Oracle as server $hostname, time $timestr");
+
+	my $sqlite_sth = $sqlite_dbh->prepare("SELECT host, volid FROM access");
+
+	# So, what we actually want to do with Oracle is something like:
+	# INSERT OR IGNORE INTO $CFG{ORACLE_TABLE} (server, time, host, volid) VALUES (?,?,?,?)
+	# but "INSERT OR IGNORE" is a SQLite thing, and the only equivalent
+	# Oracle has is via the MERGE statement. So the below statement may
+	# look a bit complicated, but keep in mind it's just the equivalent of
+	# the above "INSERT OR IGNORE" statement.
+	#
+	# The reason we can't just do a plain INSERT is that if we conflict on
+	# the primary key (set in place to avoid duplicate entries), an error
+	# will get thrown (which we could ignore) and the transaction will fail
+	# (which is harder to fix). So just avoid the conflict in the SQL
+	# statement itself.
+	#
+	# It would probably be faster to insert into a temporary table and
+	# MERGE from that, or use PL/SQL or something, but this seems good
+	# enough for now.
+	my $oracle_sth = $oracle_dbh->prepare("
+		MERGE INTO $CFG{ORACLE_TABLE} dst USING
+			(SELECT
+				? AS server,
+				? AS time,
+				? AS host,
+				? AS volid
+			FROM dual) src
+		ON
+			(src.server = dst.server AND
+			src.time = dst.time AND
+			src.host = dst.host AND
+			src.volid = dst.volid)
+		WHEN NOT MATCHED THEN
+			INSERT (server, time, volid, host) values (src.server, src.time, src.volid, src.host)
+	");
+
+	$sqlite_sth->execute();
+
+	# when we fetch a row, the 1st column will go in $host, and the 2nd
+	# column will go in $volid. This is slightly faster than other methods,
+	# since we don't need to get these values from a return from a
+	# a function, or pass them into a function for every single fetch
+	my ($host, $volid);
+	$sqlite_sth->bind_col(1, \$host, { TYPE => SQL_INTEGER });
+	$sqlite_sth->bind_col(2, \$volid, { TYPE => SQL_INTEGER });
+
+	# how many rows have we processed in this "batch"?
+	my $rowcount = 0;
+
+	# how many rows have we processed in total?
+	my $totalrows = 0;
+
+	# are we done fetching from sqlite yet?
+	my $done = 0;
+
+	# this is our callback to execute_for_fetch() below. this will get
+	# get called for every row we want to insert into the Oracle database,
+	# the array ref we return is what goes in that row.
+	my $fetch_tuple_sub = sub {
+		if ($rowcount >= ROW_BATCHSIZE) {
+			# stop this "batch", so we can commit
+			return undef;
+		}
+		if (!$sqlite_sth->fetch()) {
+			# nothing more to fetch
+			$done = 1;
+			return undef;
+		}
+		$rowcount++;
+
+		# convert $host from an NBO integer into a dotted quad string
+		# (e.g. 74.121.192.44)
+		my $hoststr = join('.', unpack('C4', pack('N', $host)));
+
+		d("Inserting row, path $path, data [$hostname, $timestr, $hoststr, $volid]") if (DEBUG);
+
+		return [$hostname, $timestr, $hoststr, $volid];
+	};
+
+	# when did we start sending data to Oracle?
+	my $start = time;
+
+	while (!$done) {
+		# this contains information about every row we tried to insert.
+		# if there was an error for a specific insert, it will contain
+		# an array reference; those are all we care about
+		my @status;
+
+		# do the actual fetches/inserts
+		if (!$oracle_sth->execute_for_fetch($fetch_tuple_sub, \@status)) {
+			die("Error executing oracle statements for sqlite $path: $DBI::errstr\n");
+		}
+
+		my @errors = grep { ref $_ } @status;
+		if (@errors) {
+			# some rows got errors when we tried to insert; report them
+			$fail = 1;
+			for (@errors) {
+				my $err = $_->[0];
+				my $errstr = $_->[1];
+				my $state = $_->[2];
+				verr("Error inserting record to oracle: ($err, $errstr, $state)");
+			}
+		}
+
+		# okay, we've done one "batch"; commit and keep going if possible
+		$totalrows += $rowcount;
+		d("Finished batch of $rowcount rows, now at: $totalrows");
+
+		$rowcount = 0;
+		$oracle_dbh->commit();
+	}
+
+	if ($fail) {
+		die("Nonfatal errors received from Oracle; not deleting sqlite db\n");
+	}
+
+	my $end = time;
+
+	vlog("Successfully exported $totalrows rows to Oracle in about ".($end-$start)." seconds");
+}
+
+# Export all of the given databases to Oracle
+sub
+oracle_export(@)
+{
+	my @dbs = @_;
+
+	my $oracle_dbh = oracle_dbopen();
+
+	# for each sqlite database file that we found, open it and call
+	# oracle_export_db on it
+	for (@dbs) {
+		my $sqlite_dbh;
+		my $path = $_->{path};
+		my $timestr = $_->{timestr};
+		my $hostname = $_->{hostname};
+		my $err = 0;
+
+		eval {
+			$sqlite_dbh = sqlite_dbopen($path);
+			oracle_export_db($oracle_dbh, $sqlite_dbh, $hostname, $path, $timestr);
+		};
+		if ($@) {
+			verr("Error exporting sqlite db $path to Oracle: $@");
+			$err = 1;
+		}
+		if ($sqlite_dbh) {
+			# make sure to cleanup the sqlite connection, even if we
+			# got errors above
+			eval { $sqlite_dbh->disconnect(); };
+			if ($@) {
+				verr("Error closing sqlite db $path: $@");
+			}
+		}
+
+		if (!$err) {
+			# if we exported everything to oracle without error,
+			# get rid of the sqlite db
+			unlink($path);
+		}
+	}
+
+	$oracle_dbh->disconnect();
+}
+
+# Get the local hostname, but make sure we don't include any "weird" characters,
+# since we use this in path names and such.
+sub get_hostname()
+{
+	my $hostname = hostname;
+	$hostname =~ s/[^0-9a-zA-Z_.-]/_/g;
+	return $hostname;
+}
+
+# Call this like: print "process died ".with_status($?)
+sub
+with_status($)
+{
+	my $status = $_[0];
+	if (WIFSIGNALED($status)) {
+		return "from signal ".WTERMSIG($?);
+	}
+	if (WIFEXITED($?)) {
+		return "with status ".WEXITSTATUS($?);
+	}
+	return "successfully";
+}
+
+sub
+run_ssh_command($$)
+{
+	my ($descr, $command) = @_;
+
+	d("Running '$descr': $command");
+
+	# Pipe stderr to stdout, so we can collect both easily and log them
+	open my $pipe, "( $command ) 2>&1 |"
+		or die("Error executing $descr: $!");
+
+	while (<$pipe>) {
+		vlog("'$descr' output: $_");
+	}
+
+	close($pipe);
+	if ($? != 0) {
+		die("'$descr' died ".with_status($?)."\n");
+	}
+
+	d("'$descr' exited successfully");
+}
+
+# Perform the variable substitution for config directives like SSH_XFER_CMD,
+# and give us the resultant string back.
+sub
+interpolate_string($$)
+{
+	my ($str, $valref) = @_;
+
+	# Replace all instances of e.g. %{FOO} with the value of $valref->{FOO}
+	# A common perl thing is to do $FOO substitution, but use %{} here
+	# instead to make sure we don't expand a shell variable when executing,
+	# and so we can easily do things like %{FOO}BAR, and to make it very
+	# that this isn't normal perl variable interpolation.
+
+	$str =~ s/\%{([^}]+)}/
+	          exists $valref->{$1} ?
+	                 $valref->{$1} :
+	                 die("Undefined substitution variable $1 in configuration")
+		/eg;
+
+	return $str;
+}
+
+# Export a single db via ssh
+sub
+ssh_export_db($$$)
+{
+	my ($hostname, $path, $timestr) = @_;
+	my $config;
+
+	vlog("Exporting database $path via ssh to machine $CFG{SSH_HOST} as server $hostname, time $timestr");
+
+	my $start = time;
+
+	my $filename = "access_${timestr}_${hostname}.sqlite";
+
+	if ($CFG{SSH_REMOTE_CONFIG}) {
+		$config = $CFG{SSH_REMOTE_CONFIG};
+	} else {
+		$config = $CONFIG_FILE;
+	}
+
+	# These are the variables available for subsitution in the config file string
+	my %vals = (
+		SSH_BINARY => $CFG{SSH_BINARY},
+		SSH_USER => $CFG{SSH_USER},
+		SSH_HOST => $CFG{SSH_HOST},
+		SSH_OPTIONS => '',
+
+		# Here we supply all arguments to the remote ACA that are needed. The
+		# remote host might specify its own arguments in an ssh authorized_keys
+		# command restriction, in which case those will override our options
+		# here. But we still specify them here in case the remote configuration
+		# does not specify e.g. the config file, and we can still run if we
+		# correctly manage to guess at what the config file should be.
+		SSH_REMOTE_CMD => "$CFG{SSH_REMOTE_ACA} --config $config --mode internal-recv $filename",
+	);
+
+	if ($CFG{SSH_KEY}) {
+		$vals{SSH_OPTIONS} .= "-i $CFG{SSH_KEY}";
+	}
+
+	my $xfer_command = interpolate_string($CFG{SSH_XFER_CMD}, \%vals);
+
+	# Now we have the command we need to run in order to run afs-client-accessd
+	# on the remote machine. Run it, piping the contents of $path to it, to
+	# transfer the db file.
+	run_ssh_command("ssh xfer", "$xfer_command < $path");
+
+	my $end = time;
+
+	vlog("Successfully exported db via ssh in about ".($end-$start)." seconds");
+}
+
+# Export all of the given databases via ssh
+sub
+ssh_export(@)
+{
+	my @dbs = @_;
+
+	# For each sqlite database file that we found, push it via ssh.
+	# This could be made more efficient by transferring db files over a single
+	# connection, by maybe e.g. tarring them up and untarring on the remote
+	# side. But even transferring multiple databases at all should be rare, so
+	# don't bother.
+	for (@dbs) {
+		my $path = $_->{path};
+		my $timestr = $_->{timestr};
+		my $hostname = $_->{hostname};
+		my $err = 0;
+
+		eval {
+			ssh_export_db($hostname, $path, $timestr);
+		};
+		if ($@) {
+			verr("Error exporting sqlite db $path via ssh: $@");
+			$err = 1;
+		}
+
+		if (!$err) {
+			# if we exported everything via ssh without error,
+			# get rid of the sqlite db
+			unlink($path);
+		}
+	}
+}
+
+# this forks the process, and in the new process, submits the collected data
+# to the central location via Oracle or via ssh
+sub
+spawn_exporter()
+{
+	if ($EXPORTER_PID) {
+		# wait for the existing exporter process to die
+		d("Not spawning exporter; existing pid $EXPORTER_PID exists");
+		return;
+	}
+
+	# spawn a new process, so we can export stuff in the background while
+	# still collecting audit data locally
+	my $pid = fork();
+	if (!defined($pid)) {
+		die("Error calling fork: $!\n");
+	}
+
+	if ($pid != 0) {
+		# parent process
+		$EXPORTER_PID = $pid;
+		d("New exporter process $pid");
+		return;
+	}
+
+	# here, we are the child process.
+
+	opendir(my $dh, $CFG{SQLITE_PREFIX})
+		or die("Cannot open sqlite db dir $CFG{SQLITE_PREFIX}: $!\n");
+
+	# scan the SQLITE_PREFIX dir, and export all databases that look like
+	# ours
+	my $filename;
+	my @dbs;
+	my $local_hostname = get_hostname();
+
+	while (($filename = readdir($dh))) {
+
+		if ($filename =~ m/^access_(\d+)[.]sqlite$/) {
+			# If the filename doesn't have a host name in it, assume it's from us.
+			push @dbs, { path => "$CFG{SQLITE_PREFIX}/$filename",
+			             hostname => $local_hostname,
+			             timestr => $1 };
+
+		} elsif ($filename =~ m/^access_(\d+)_([0-9a-zA-Z_.-]+)[.]sqlite$/) {
+			push @dbs, { path => "$CFG{SQLITE_PREFIX}/$filename",
+			             hostname => $2,
+			             timestr => $1 };
+		} else {
+			d("Ignored filename $filename in SQLITE_PREFIX");
+		}
+	}
+
+	closedir($dh);
+
+	if ($EXPORT_MODE eq "ssh") {
+		ssh_export(@dbs);
+	} elsif ($EXPORT_MODE eq "oracle") {
+		oracle_export(@dbs);
+	} else {
+		die("Internal error: weird export mode $EXPORT_MODE");
+	}
+
+	# we are done. just exit; the parent process will spawn the exporter
+	# again when it is ready
+
+	exit(0);
+}
+
+my $checksignals_firstrun = 1;
+# check for changes flagged by a signal handler
+sub
+checksignals()
+{
+	if (DEBUG) {
+		if ($SIGNAL_SHUTDOWN) {
+			d("Got SIGINT/TERM/etc");
+		} elsif ($SIGNAL_CHILD) {
+			d("Got SIGCHLD");
+		} elsif ($SIGNAL_CONFIG) {
+			d("Got SIGHUP");
+		} else {
+			d("Got SIGALRM");
+		}
+	}
+
+	# were we signalled to shutdown?
+	if ($SIGNAL_SHUTDOWN) {
+		vlog("shutting down...");
+		stop_collection(undef);
+		exit(0);
+	}
+
+	# were we signalled to re-read our config?
+	if ($SIGNAL_CONFIG) {
+		eval {
+			read_config();
+		};
+		if ($@) {
+			verr("Error reloading config file $CONFIG_FILE; ignoring and ".
+			     "continuing to use existing configuration. Errors: $@");
+		} else {
+			vlog("Successfully reloaded config file $CONFIG_FILE");
+		}
+	}
+
+	if ($EXPORTER_PID and waitpid($EXPORTER_PID, WNOHANG) > 0) {
+
+		# our exporter child process died
+		if ($? != 0) {
+			verr("Child exporter process died ".with_status($?));
+		}
+
+		d("Exporter process $EXPORTER_PID has exited");
+		$EXPORTER_PID = 0;
+	}
+
+	# make this function gets called periodically, to check if we need to
+	# rotate the db
+	alarm(ALARM_INTERVAL);
+
+	# see what our db name should be according to the _current_ time
+	my $next_dbname = get_dbname();
+
+	d("Checking for db rollover: $next_dbname vs $CUR_DBNAME");
+
+	if ($next_dbname ne $CUR_DBNAME) {
+		# the database name changed (i.e., it's a new day)
+		# so, dump the current data to the non-temporary filename, and create a
+		# new database and open it, and start collecting to that
+
+		stop_collection($next_dbname);
+
+		# export database in the background
+		d("Spawning exporter due to db name change");
+		spawn_exporter();
+
+		$CUR_DBNAME = $next_dbname;
+
+		# set up our sqlite stuff again so we can record new data to it
+		start_collection();
+
+	} elsif ($checksignals_firstrun) {
+		# Scan for databases to export on our first run, so we
+		# immediately catch things if they were left behind on a
+		# previous run.
+		d("Spawning exporter due to firstrun");
+		spawn_exporter();
+
+	} elsif (!$AUDIT_ENABLED && !$SIGNAL_CHILD) {
+		# If we're not reading audit logs, performance is less
+		# critical, so always scan for databases to export, for every
+		# alarm interval, so we find them quickly. Don't do this if
+		# we were signalled from an exiting child, or else we will
+		# constantly scan for databases, since when the exporter exits
+		# it will trigger another exporter and so on...
+		d("Spawning exporter due to non-audit non-child");
+		spawn_exporter();
+	}
+
+	$checksignals_firstrun = 0;
+
+	$SIGNAL_SHUTDOWN = 0;
+	$SIGNAL_CONFIG = 0;
+	$SIGNAL_CHILD = 0;
+	$SIGNALLED = 0;
+}
+
+# main exporting loop, only used if we are _not_ processing audit data
+sub
+export_loop()
+{
+	checksignals();
+	while (1) {
+		if ($SIGNALLED) {
+			checksignals();
+		}
+		POSIX::pause();
+	}
+}
+
+# main processing loop, for collecting audit data
+sub
+msgloop($)
+{
+	my ($mqid) = @_;
+
+	my $msgsize = 4096;
+	my ($msg, $msgtype, $msgtext);
+	my ($host, $fidstr);
+
+	checksignals();
+
+	# continue forever until we're signalled to quit
+	# keep in mind this loop is a hot path; if the fileserver is getting
+	# a lot of accesses, we will get a lot of audit messages
+	while (1) {
+		if ($SIGNALLED) {
+			checksignals();
+		}
+
+		if (!msgrcv($mqid, $msg, $msgsize, 0, 0)) {
+			if ($!{EINTR} or $!{E2BIG}) {
+				next;
+			}
+			die("msgrcv failed: $!\n");
+		}
+
+		# 'msgtype' we don't care about; they're all the same for OpenAFS
+		# audit logs. just look at msgtext for the data
+		($msgtype, $msgtext) = unpack("l! a*", $msg);
+
+		# only process messages that tell us the accessed FID and the client host.
+		# all such messages are formatted in this way
+		if (!($msgtext =~ m/^.{25}\[\d+\] EVENT [^ ]+ CODE \d+ NAME [^ ]+ HOST (\d+\.\d+\.\d+\.\d+) ID \d+ (FID.*)$/m)) {
+			d("Skipping audit message $msgtext") if (DEBUG);
+			next;
+		}
+		d("Processing audit message $msgtext") if (DEBUG);
+
+		# convert the given host IP from dotted quads, to a single number in
+		# net-byte order
+		$host = unpack('N', pack('C4', split('\.', $1)));
+		$fidstr = $2;
+
+		# keep track of the last volume seen. BulkStatus messages can request
+		# multiple FIDs at once, which are usually, but not necessarily, for
+		# the same volid. so, skip hitting the database if we get the same
+		# volume multiple times in a row, to optimize for the common case
+		my $lastvol = undef;
+
+		# loop through all matches in $fidstr, to find all mentioned FIDs
+		while ($fidstr =~ m/FID (\d+):\d+:\d+/g) {
+			my $vol = $1;
+			if (defined($lastvol) && $vol == $lastvol) {
+				next;
+			}
+			$lastvol = $vol;
+
+			# add this 'access' to the database
+			d("Adding access from $host for $vol") if (DEBUG);
+			$COLLECT_STH->execute($host, $vol);
+		}
+	}
+}
+
+# set up Oracle environment stuff
+sub
+oracle_env()
+{
+	# Using the Oracle client requires some environment variables to be set.
+	# Setting LD_LIBRARY_PATH before loading the client is not sufficient on
+	# all platforms, so re-execute ourselves to be more sure that we're okay.
+
+	if (!(defined($ENV{ORACLE_HOME}) and $ENV{ORACLE_HOME} eq $CFG{ORACLE_HOME})) {
+		$ENV{ORACLE_HOME} = $CFG{ORACLE_HOME};
+
+		my $ldpath = '';
+		if ($ENV{LD_LIBRARY_PATH}) {
+			$ldpath = ':' . $ENV{LD_LIBRARY_PATH};
+		}
+		$ENV{LD_LIBRARY_PATH} = "$ENV{ORACLE_HOME}/lib" . $ldpath;
+
+		exec $^X, $0, @ORIGINAL_ARGV
+			or die("Cannot re-exec with changed environment: $!\n");
+	}
+
+	require DBD::Oracle;
+}
+
+sub
+recv_loop()
+{
+	my $conn = $ENV{SSH_CONNECTION};
+	my $nonce = int(rand(100000));
+	my $file;
+	my $tmp;
+	my $dest;
+	my $code;
+	my $buf;
+	my $arg;
+
+	if (!$conn) {
+		die("recv: ssh env vars not set correctly\n");
+	}
+
+	if (scalar(@ARGV) != 1) {
+		die("recv: weird argv from conn $conn: ".join(' ', @ARGV)."\n");
+	}
+
+	$arg = $ARGV[0];
+
+	if (!($arg =~ m/^access_(\d+_[0-9a-zA-Z_.-]+[.]sqlite)$/)) {
+		die("recv: weird filename $arg from conn $conn\n");
+	}
+
+	$file = $1;
+	$tmp = "$CFG{SQLITE_PREFIX}/accesstmp${nonce}_$file";
+	$dest = "$CFG{SQLITE_PREFIX}/access_$file";
+
+	d("recv got request for file $arg from conn $conn, saving to $tmp then $dest");
+
+	if (-e $dest) {
+		die("Error receiving file $arg from conn $conn: Destination file $dest already exists\n");
+	}
+
+	sysopen(my $fh, $tmp, O_WRONLY | O_CREAT | O_EXCL) or die("Cannot create $tmp: $!\n");
+
+	binmode(STDIN);
+
+	while (($code = read(STDIN, $buf, 4096))) {
+		if (!print $fh $buf) {
+			die("Error when writing tmp file for file $arg conn $conn: $!\n");
+		}
+	}
+	if (!defined($code)) {
+		die("Error reading from stdin from conn $conn: $!\n");
+	}
+
+	if (!close($fh)) {
+		die("Error closing tmp file $tmp from conn $conn\n");
+	}
+
+	# Check again, after the file data has transferred
+	if (-e $dest) {
+		die("Error receiving file $arg from conn $conn: Destination file $dest already exists\n");
+	}
+
+	if (!rename($tmp, $dest)) {
+		die("Error receiving file $arg from conn $conn: cannot move $tmp to $dest: $!\n");
+	}
+
+	d("Done receiving file $dest from $conn");
+
+	exit(0);
+}
+
+# main; everything in here and called from here will get die()s caught, and
+# reported to syslog
+sub
+main()
+{
+	my $path = $CFG{AUDIT_PATH};
+
+	if ($EXPORT_MODE eq "internal-recv") {
+		recv_loop();
+	}
+
+	# set up signals, for clean shutdown and db rotation
+	$SIG{INT} = \&sigint;
+	$SIG{TERM} = \&sigint;
+	$SIG{QUIT} = \&sigint;
+	$SIG{ALRM} = \&sigalrm;
+	$SIG{CHLD} = \&sigchld;
+	$SIG{HUP} = \&sighup;
+	alarm(ALARM_INTERVAL);
+
+	$CUR_DBNAME = get_dbname();
+
+	if (!$AUDIT_ENABLED) {
+		vlog("daemon started. Not processing audit log entries; just exporting dbs.");
+		export_loop();
+		return;
+	}
+
+	# open the SysV message queue
+	my $mqkey = ftok($path, 1);
+	if (!defined($mqkey)) {
+	    die("$path does not exist\n");
+	}
+	my $mqid = msgget($mqkey, S_IRUSR);
+	if (!defined($mqid)) {
+		die("Cannot open queue $mqkey ($path): $!\n");
+	}
+
+	# if there's some leftover in-progress data from an unclean shutdown,
+	# throw it away. we can't read it anyway
+	if (unlink($SQLITE_TEMP)) {
+		vlog("deleted stray temporary db $SQLITE_TEMP");
+	}
+
+	# see if there's an existing SQLite database for today; continue using it
+	# if it exists.
+	if (-e $CUR_DBNAME) {
+		vlog("appending to existing database $CUR_DBNAME");
+		rename($CUR_DBNAME, $SQLITE_TEMP)
+			or die("Cannot rename $CUR_DBNAME to $SQLITE_TEMP: $!");
+	}
+
+	vlog("daemon started. First results will go in $CUR_DBNAME");
+
+	start_collection();
+
+	msgloop($mqid);
+}
+
+# perform a simple connection test to the Oracle db
+sub
+test_oracle_conn()
+{
+	print "Testing Oracle connection...\n";
+	my $dbh = oracle_dbopen();
+	my $res = $dbh->selectrow_array("SELECT 3 FROM dual");
+	if (!defined($res)) {
+		$res = 'undefined';
+	}
+	if ($res != 3) {
+		die("Got weird result from test query (got $res, expected 3)\n");
+	}
+	$dbh->disconnect();
+	print "Success!\n";
+	exit(0);
+}
+
+sub
+usage()
+{
+    print "Usage: $0 --config <afs-client-accessd.conf> --mode <export mode> [--check] [--no-auditlog]\n";
+    exit(1);
+}
+
+# some general preamble stuff; read args, read config, open log, etc
+# 'main' is where the interesting code starts
+
+my $check = 0;
+my $no_auditlog = 0;
+@ORIGINAL_ARGV = @ARGV;
+
+my %optspec = ("config=s" => \$CONFIG_FILE,
+               "mode=s" => \$EXPORT_MODE,
+               "no-auditlog" => \$no_auditlog,
+               "check" => \$check,
+);
+
+if ($ENV{SSH_ORIGINAL_COMMAND}) {
+	# If we're called from an ssh command-restricted authorized_keys file, get
+	# our arguments from the environment. But let the actual command-line
+	# arguments override anything specified here; they are overridden by the
+	# other GetOptions call below.
+	my ($ret, $args) = GetOptionsFromString($ENV{SSH_ORIGINAL_COMMAND}, %optspec);
+	if (!$ret) {
+		die("Error parsing arguments from SSH_ORIGINAL_COMMAND\n");
+	}
+
+	# take off the first arg; that's just the name of the command
+	my $prog = shift(@$args);
+	if (!($prog =~ m:(^|/)afs-client-accessd$:)) {
+		# Bail out if the other side tried to run something besides
+		# afs-client-accessd. This could be a false positive if someone called
+		# the program something else, but at least for now err on the side of
+		# failing in case something weird/wrong is going on.
+		die("Got weird command from SSH_ORIGINAL_COMMAND: $prog\n");
+	}
+
+	# add any remaining arguments to our argument list, so unparsed arguments
+	# will still be detected via e.g. recv_loop
+	push @ARGV, @$args;
+}
+
+GetOptions(%optspec) or usage();
+defined($CONFIG_FILE) or usage();
+defined($EXPORT_MODE) or usage();
+($EXPORT_MODE =~ m/^oracle|ssh|internal-recv$/) or usage();
+
+if ($no_auditlog) {
+	$AUDIT_ENABLED = 0;
+}
+
+read_config();
+
+if ($EXPORT_MODE eq "oracle") {
+	oracle_env();
+
+	if ($check) {
+		test_oracle_conn();
+	}
+} else {
+	if ($check) {
+		print "Success!\n";
+		exit(0);
+	}
+}
+
+openlog('afs-client-accessd', 'pid', $CFG{LOG_FACILITY})
+	or die("openlog: $!");
+
+eval {
+	main();
+};
+if ($@) {
+	verr($@);
+	exit(1);
+}
+exit(0);

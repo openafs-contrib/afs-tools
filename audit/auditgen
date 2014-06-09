@@ -1,0 +1,55 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use IPC::SysV qw(IPC_CREAT S_IRUSR ftok IPC_NOWAIT);
+
+my $path = '/tmp/fileaudit';  # '/usr/afs/logs/FileAudit';
+
+my $mqkey = ftok($path, 1);
+if (not defined($mqkey)) {
+	die("ftok: $!\n");
+}
+
+my $mqid = msgget($mqkey, S_IRUSR | IPC_CREAT);
+if (not defined($mqid)) {
+	die("msgget: $!\n");
+}
+
+my $stop = 0;
+
+sub sigint {
+	$stop = 1;
+}
+
+$SIG{INT} = \&sigint;
+
+my $success = 0;
+my $fail = 0;
+
+sub domsg($$$$$) {
+	my ($ip1, $ip2, $ip3, $ip4, $volid) = @_;
+	my $message = "Thu Mar 14 00:00:00 2013 [1] EVENT AFS_SRX_FchData CODE 0 NAME --UnAuth-- HOST $ip1.$ip2.$ip3.$ip4 ID 32766 FID $volid:1:1";
+	if (msgsnd($mqid, pack("l! a*", 1, $message), IPC_NOWAIT)) {
+		$success++;
+	} else {
+		$fail++;
+	}
+print "success: $success, fail: $fail\n";
+}
+while (not $stop) {
+	my ($ip1, $ip2, $ip3, $ip4);
+	my $volid;
+	$ip1 = int(rand(256));
+	$ip2 = int(rand(256));
+	$ip3 = int(rand(256));
+	$ip4 = int(rand(256));
+	$volid = int(rand(805306368));
+	domsg($ip1, $ip2, $ip3, $ip4, $volid);
+last;
+}
+
+print "\n";
+print "Success: $success\n";
+print "Fail:    $fail\n";
