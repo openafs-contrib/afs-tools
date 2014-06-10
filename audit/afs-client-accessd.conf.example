@@ -1,0 +1,158 @@
+#
+# afs-client-accessd configuration
+#
+
+# LOG_FACILITY specifies what syslog facility to use. Defaults to LOG_DAEMON. This
+# directive may NOT be changed while B<afs-client-accessd> is running.  The
+# values that can be specified for this directive are symbolic constants and not
+# strings, so do not quote them. Any syslog facility constants defined for the
+# running system are allowed (e.g. LOG_AUTH, LOG_USER).
+
+LOG_FACILITY => LOG_LOCAL0,
+
+
+# AUDIT_PATH specifies the path to the System V message queue for the
+# fileserver's audit log. This directive must match the C<-auditlog> parameter
+# given to the fileserver. There is no default for this option, and it must be
+# specified.  This option may NOT be changed while B<afs-client-accessd> is
+# running.
+
+AUDIT_PATH => '/usr/afs/logs/FileAudit',
+
+
+# SQLITE_PREFIX specifies the directory in which the local disk databases will
+# be stored before they are exported to the central database store. Defaults to
+# "/usr/afs/logs/accessdb". afs-client-accessd will bail out on startup if this
+# directory does not exist. This option may NOT be changed while
+# afs-client-accessd is running.
+#
+# This path should point to disk that is relatively fast to ensure we don't lose
+# audit messages from the fileserver. It should also be large enough to hold a
+# few days worth of local disk records. This is because, while ideally we only
+# hold about 1 or 2 days worth of records there, if there are any errors with
+# exporting the data to the central Oracle database, the local disk databases
+# will keep accumulating until we can export them to Oracle again.
+
+SQLITE_PREFIX => '/var/afs-accessdb',
+
+#---------------------------------------------------------------------------------
+# Configuration for ssh export mode (--mode ssh).
+#---------------------------------------------------------------------------------
+
+# SSH_BINARY specifies the command to run for the "ssh" command, which is used
+# when transferring database files to the central ssh host in the "ssh" export
+# mode.  This can be an absolute path to an "ssh" binary or wrapper script.  The
+# default value is just "ssh". This option can be changed while
+# afs-client-accessd is running.
+
+SSH_BINARY => '/usr/local/bin/ssh',
+
+# SSH_USER specifies what username to use when exporting the local databases to a
+# central host via ssh in the "ssh" export mode. By default, this is the value of
+# the USER environment variable. This option can be changed while
+# afs-client-accessd is running.
+
+SSH_USER => 'afsaccessdb',
+
+# SSH_HOST specifies the host we connect to for the "ssh" export mode. You can
+# specify any name that is understood by ssh (either a hostname that can be
+# resolved, or a name that is recognized in the local ssh_config).
+# afs-client-accessd must be able to connect to this host via ssh without a
+# password. This can be done via ssh public key authentication (see SSH_KEY
+# below), GSSAPI authentication, or other methods.
+#
+# This option is required for the "ssh" export mode, and has no default. This
+# option can be changed while B<afs-client-accessd> is running.
+
+SSH_HOST => 'central-host.example.com',
+
+# SSH_KEY specifies the path to an ssh private key, for use with the "ssh" export
+# mode. If specified, B<afs-client-accessd> will use the specified private key
+# file when connecting to SSH_HOST. If this is not specified, the default
+# behavior is the default behavior of ssh, which is to try to the keys
+# ~/.ssh/id_rsa and ~/.ssh/id_dsa, if they exist.
+#
+# This option is optional, and has no default value. This option can be changed
+# while afs-client-accessd is running.
+
+SSH_KEY => '/srv/afs-client-accessd/id_rsa.afsaccess',
+
+# SSH_REMOTE_ACA specifies the command to run on remote machines for the "ssh"
+# export mode.  This must be a command that when run on a remote machine,
+# executes the afs-client-accessd program. It can either be a full path to
+# afs-client-accessd, or the name of a command in the PATH, or a wrapper, etc.
+# The default value is just "afs-client-accessd". This option can be changed
+# while afs-client-accessd is running.
+
+SSH_REMOTE_ACA => '/usr/local/bin/afs-client-accessd',
+
+# SSH_XFER_CMD specifies the command to run in order to export a database from
+# local disk to the central ssh host, in the "ssh" export mode. You probably do
+# not need to change the value of this option. This option can be used to change
+# what command we use to transfer the files; it does not necessarily even need to
+# be ssh-based.  The string specified here is not taken literally, but instead
+# many substitutions for various values are performed. See the section on SSH
+# COMMAND SUBSTITUION in the afs-client-accessd man page for what substitutions
+# are performed.
+
+SSH_XFER_CMD => 'rsh -l %{SSH_USER} %{SSH_HOST} %{SSH_REMOTE_CMD}',
+
+#---------------------------------------------------------------------------------
+# Configuration for oracle export mode (--mode oracle)
+#---------------------------------------------------------------------------------
+
+# ORACLE_HOME specifies the ORACLE_HOME variable used for the Oracle client driver.
+# afs-client-accessd will attempt to set the various Oracle environment
+# variables according to this value (ORACLE_HOME, and LD_LIBRARY_PATH), if they
+# are not already set when afs-client-accessd is started.
+#
+# This option has no default, and is mandatory for the "oracle" export mode. This
+# option may NOT be changed while afs-client-accessd is running.
+
+ORACLE_HOME => '/u01/app/oracle/foo',
+
+# ORACLE_DSN specifies the connection information used when exporting data to the
+# central Oracle database. If you know your "service name", just specify the
+# service name by itself. If instead you want to specify the host, port, and SID
+# to connect to, you can specify those in the form:
+#
+#   "host=$host;port=$port;sid=$sid"
+#
+# Or you can use an EZCONNECT url, of the form:
+#
+#   "//$host:$port/$servicename"
+#
+# Keep in mind that "SID" and "service name" are not always the same thing. For
+# more details on what can be specified, see the perl DBD::Oracle documentation
+# on the "connect" method. When we connect to Oracle, we basically call:
+#
+#   $dbh = DBI->connect("dbi:Oracle:$ORACLE_DSN", $user, $pass);
+#
+# This option is required for the "oracle" export mode, and has no default. This
+# option can be changed while B<afs-client-accessd> is running.
+
+ORACLE_DSN => 'host=oracle.example.com;port=1522;sid=MYSID',
+
+# ORACLE_USER specifies the username to use when we export data to the central Oracle
+# database. It's also possible to specify the database and password in this
+# field, but it's probably less confusing to leave those to the ORACLE_DSN and
+# ORACLE_PASSWORD directives.
+#
+# This option is required for the "oracle" export mode, and has no default. This
+# option can be changed while afs-client-accessd is running.
+
+ORACLE_USER => 'scott',
+
+# ORACLE_PASSWORD specifies the password to use when we export data to the
+# central Oracle database. This option is required for the "oracle" export mode,
+# and has no default. This option can be changed while afs-client-accessd is
+# running.
+
+ORACLE_PASSWORD => 'secret',
+
+# ORACLE_TABLE specifies the table name to use when we export data to the central
+# Oracle database. Defaults to "accesses". This table must exist before we can
+# export data to the Oracle database. This option can be changed while
+# afs-client-accessd is running.
+
+ORACLE_TABLE => 'afsclientaccesses',
