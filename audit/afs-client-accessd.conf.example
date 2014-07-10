@@ -35,6 +35,11 @@ AUDIT_PATH => '/usr/afs/logs/FileAudit',
 
 SQLITE_PREFIX => '/var/afs-accessdb',
 
+# RHEL 5.x broken msgrcv workaround. msgrcv fails supriously
+# on older versions of RHEL 5.x without setting the errno. strace
+# shows ERESTARTNOHAND errors.
+MSGRCV_WORKAROUND => 0,
+
 #---------------------------------------------------------------------------------
 # Configuration for ssh export mode (--mode ssh).
 #---------------------------------------------------------------------------------

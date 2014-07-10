@@ -175,6 +175,16 @@ Example:
 
   SQLITE_PREFIX => '/var/afs-accessdb',
 
+=item MSGRCV_WORKAROUND
+
+C<msgrcv> fails supriously on some older versions of RHEL 5.x with
+the internal error ERESTARTNOHAND. Set this option to 1 (true) to
+ignore all C<msgrcv> errors instead of exiting..
+
+Example:
+
+  MSGRCV_WORKAROUND => 1,
+
 =item SSH_BINARY
 
 This specifies the command to run for the "ssh" command, which is used when
@@ -559,6 +569,8 @@ read_config()
 
 		SSH_XFER_CMD => '%{SSH_BINARY} %{SSH_OPTIONS} %{SSH_USER}@%{SSH_HOST} -- %{SSH_REMOTE_CMD}',
 		# the rest of the SSH_* directives have no defaults
+
+		MSGRCV_WORKAROUND => 0,
 	);
 
 	if (!-r $CONFIG_FILE) {
@@ -1344,6 +1356,9 @@ msgloop($)
 		if (!msgrcv($mqid, $msg, $msgsize, 0, 0)) {
 			if ($!{EINTR} or $!{E2BIG}) {
 				next;
+			}
+			if ($CFG{MSGRCV_WORKAROUND}) {
+				next; # ignore spurious errors on RHEL 5.x.
 			}
 			die("msgrcv failed: $!\n");
 		}
