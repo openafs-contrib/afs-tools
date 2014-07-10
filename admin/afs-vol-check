@@ -538,6 +538,7 @@ sub vldb_lookup_entry
 #
 sub vos_listvldb
 {
+    my $errors = 0;
     my $vldb = {
         names => {},     # hash of info by rw volume names
         numbers => {},   # hash of info by rw volume numbers
@@ -563,7 +564,13 @@ sub vos_listvldb
                 $v = {};
             }
             if (exists($v->{name})) {
-                vldb_add_entry($vldb, $v);
+                eval {
+                    vldb_add_entry($vldb, $v);
+                };
+                if ($@) {
+                    $errors++;
+                    warn $@;
+                }
             }
             $v = {name=>$1, sites=>[], locked=>0};
             next;
@@ -617,11 +624,13 @@ sub vos_listvldb
                     $id = 0; # ro volume not created yet
                 }
                 else {
-                    die "vldb: error reading listvldb: ro id not found: $v->{name}";
+                    $errors++;
+                    warn "vldb: error reading listvldb: ro id not found: $v->{name}";
                 }
             }
             else {
-                die "vldb: error reading listvldb: unexpected volume type: $v->{name}";
+                $errors++;
+                warn "vldb: error reading listvldb: unexpected volume type: $v->{name}";
             }
             my $vs = {serv=>$server, part=>$part, parent=>$parent,
                       id=>$id, type=>$type, name=>volname($v->{name}, $type)};
@@ -642,12 +651,22 @@ sub vos_listvldb
         }
     }
     if (exists($v->{name})) {
-        vldb_add_entry($vldb, $v);
+        eval {
+            vldb_add_entry($vldb, $v);
+        };
+        if ($@) {
+            $errors++;
+            warn $@;
+        }
     }
     $vldb->{servers} = [keys(%{ $vldb->{servers} })];
     close($vos);
     unless ($? == 0) {
-        die "error: $cmd: code=$?";
+        $errors++;
+        warn "error: $cmd: code=$?";
+    }
+    if ($errors) {
+        die "Errors while reading vldb.\n";
     }
     return $vldb;
 }
