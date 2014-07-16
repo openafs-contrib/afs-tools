@@ -151,7 +151,7 @@ use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
 
-our $VERSION = "1.04";
+our $VERSION = "1.05";
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -295,12 +295,13 @@ sub check_for_broken_volume_names
         my $key = site_key($site);
         if (exists($db->{$key})) {
             my $v = $db->{$key};
+
             if ($site->{name} && ($v->{name} ne $site->{name})) {
                 fail("name mismatch: $site->{name} ($site->{id}) ".
                      "should be $v->{name} ".
                      "at $site->{serv} $site->{part}");
             }
-            if ($v->{type} ne $site->{type}) {
+            if ($site->{type} && ($v->{type} ne $site->{type})) {
                 my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
                 fail("type mismatch: $vol ".
                      "$site->{type} should be $v->{type} ".
@@ -818,11 +819,35 @@ sub vos_listvol
         }
         if ($state == 1) {
             if (/^END_OF_ENTRY/) {
-                push(@{ $vol->{list} }, $v);
+                my $ok = 1;
+                # the following should always be provided
+                foreach my $k (qw(id serv status)) {
+                    unless (exists $v->{$k}) {
+                        $ok = 0;
+                        warn "vol: missing $k field in listvol\n";
+                    }
+                }
+                if (exists $v->{status}) {
+                    if ($v->{status} eq "OK") {
+                        foreach my $k (qw(name type)) {
+                            unless (exists $v->{$k}) {
+                                warn "vol: missing $k field in listvol\n";
+                            }
+                        }
+                    }
+                    # Old versions of vos put garbage in "name" when
+                    # status was not ok.
+                    if ($v->{status} ne "OK" and exists $v->{name}) {
+                        delete $v->{name};
+                    }
+                }
+                if ($ok) {
+                    push(@{ $vol->{list} }, $v);
+                }
                 $state = 0;
                 next;
             }
-            if (/^(name|id|type|serv|status|parentID|needsSalvaged|destroyMe)\s+(\S+)/) {
+            if (/^(name|id|type|serv|status)\s+(\S+)/) {
                 $v->{$1} = $2;
                 next;
             }
