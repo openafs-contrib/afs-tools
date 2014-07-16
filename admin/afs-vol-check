@@ -21,7 +21,8 @@ afs-vol-check
 
 =head1 SYNOPSIS
 
-afs-volcheck [--level=<n>] [--cell=<cell name>] [--offline=<path>] [--verbose] [--version] [--help]
+afs-volcheck [--level=<n>] [--save=<path> | --offline=<path>] [--cell=<cell name>]
+             [--verbose] [--version] [--help]
 
 =head1 OPTIONS
 
@@ -39,11 +40,16 @@ level. The default level is 0 (zero).
 Name of the cell in which to run the AFS commands when gathering data
 from the AFS servers.
 
+=item B<--save>=<I<path>>
+
+Save the output of the C<vos> commands into a set of files. The files are
+created in the directory I<path>, which must already exist and must be emtpy.
+The created files can be processed later using the B<--offline> option.
+
 =item B<--offline>=<I<path>>
 
-Instead of running C<vos>, read a set of files in I<path> containing the output
-of the C<vos listvldb>, C<vos status>, and C<vos listvol> commands previously
-run.
+Instead of running C<vos>, read the set of files in I<path> containing the
+output from a previous C<afs-vol-check> invoked with the B<--save> option.
 
 =item B<--verbose>, B<-v>
 
@@ -158,6 +164,7 @@ my $opt_level = 0;   # fastest, but least checks
 my $opt_verbose = 0;
 my $opt_cell = "";   # use local cell
 my $opt_version = 0;
+my $opt_save = "";
 my $opt_offline = "";
 
 GetOptions(
@@ -166,6 +173,7 @@ GetOptions(
     "verbose|v" => \$opt_verbose,
     "help|h|?" => \$opt_help,
     "version" => \$opt_version,
+    "save=s" => \$opt_save,
     "offline=s" => \$opt_offline,
 ) or pod2usage(2);
 if ($opt_help) {
@@ -174,6 +182,17 @@ if ($opt_help) {
 if ($opt_version) {
     print $VERSION, "\n";
     exit(0);
+}
+if ($opt_save and $opt_offline) {
+    die "Cannot run with --save and --offline.\n";
+}
+if ($opt_save) {
+    unless (-d $opt_save) {
+        die "--save: directory does not exist: $opt_save\n";
+    }
+    unless (dir_empty($opt_save)) {
+        die "--save: directory is not empty: $opt_save\n";
+    }
 }
 
 exit main();
@@ -196,6 +215,23 @@ sub main
     check_for_failed_releases($vldb);
 
     return 0; # all checks ran
+}
+
+#------------------------------------------------------------------
+# Returns true if directory is empty.
+sub dir_empty
+{
+    my $path = shift;
+
+    opendir(my $dir, $path) or die "Failed to open $path: $!\n";
+    while (readdir($dir)) {
+        next if /^[.]\z/;
+        next if /^[.][.]\z/;
+        closedir($dir);
+        return 0;
+    }
+    closedir($dir);
+    return 1;
 }
 
 #------------------------------------------------------------------
@@ -549,6 +585,7 @@ sub vos_listvldb
 {
     my $errors = 0;
     my $vos;
+    my $save;
     my $errormsg = "";
     my $vldb = {
         names => {},     # hash of info by rw volume names
@@ -572,10 +609,16 @@ sub vos_listvldb
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
+        if ($opt_save) {
+            my $file = "$opt_save/listvldb";
+            info("saving to file $file");
+            open($save, ">", $file) or die "Failed to open $file: $!";
+        }
     }
 
     my $v;  # volume group
     while (<$vos>) {
+        print $save $_ if $save;
         chomp;
         next if /^\s*$/; # skip blank lines
         if (/^(\S+)\s*$/) {
@@ -701,6 +744,7 @@ sub vos_listvol
     my $vol = shift;
     my $server = shift;
     my $vos;
+    my $save;
     my $errormsg = "";
 
     my $options = "-server $server -noauth -noresolve";
@@ -727,12 +771,21 @@ sub vos_listvol
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
+        if ($opt_save) {
+            my $file = "$opt_save/$server.listvol";
+            if ($options =~ /\-fast/) {
+                $file .= ".fast";
+            }
+            info("saving to file $file");
+            open($save, ">", $file) or die "Failed to open $file: $!";
+        }
     }
 
     my $state = 0;
     my $v;
     my $part;  # current partition
     while(<$vos>) {
+        print $save $_ if $save;
         chomp;
         next if /^\s*$/;                  # skip blank lines
         next if /^Total volumes/;         # skip summary lines
@@ -830,6 +883,7 @@ sub vos_status
     my $tx = shift;
     my $server = shift;
     my $vos;
+    my $save;
     my $errormsg = "";
 
     my $options = "-server $server -noauth -noresolve";
@@ -847,10 +901,16 @@ sub vos_status
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
+        if ($opt_save) {
+            my $file = "$opt_save/$server.status";
+            info("saving to file $file");
+            open($save, ">", $file) or die "Failed to open $file: $!";
+        }
     }
 
     my ($state, $total, $count, $t) = (0, 0, 0, undef);
     while(<$vos>) {
+        print $save $_ if $save;
         chomp;
         next if /^\s*$/;  # skip blank lines
         if ($state == 0) {
