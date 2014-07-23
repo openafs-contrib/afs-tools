@@ -545,13 +545,15 @@ sub vldb_add_parent_id
 {
     my ($vldb, $parent, $id) = @_;
 
-    if (exists($vldb->{parents}->{$id})) {
-        unless ($vldb->{parents}->{$id} == $parent) {
-            warn("vldb: conflicting parent id numbers for volume $id");
+    if ($id != 0) {
+        if (exists($vldb->{parents}->{$id})) {
+            unless ($vldb->{parents}->{$id} == $parent) {
+               warn("vldb: conflicting parent id numbers for volume $id");
+            }
         }
-    }
-    else {
-        $vldb->{parents}->{$id} = $parent;
+        else {
+            $vldb->{parents}->{$id} = $parent;
+        }
     }
 }
 
@@ -568,6 +570,7 @@ sub vldb_add_entry
 
     my $name = $v->{name};
     validate(exists($v->{rw}),     "vldb: read/write volume id missing: $name");
+    validate($v->{rw} != 0,        "vldb: read/write volume id is zero: $name");
 
     validate(exists($v->{sites}),  "vldb: sites missing: $name");
     validate(exists($v->{nsites}), "vldb: number of sites missing: $name");
@@ -586,7 +589,7 @@ sub vldb_add_entry
         $vldb->{servers}->{$s->{serv}} = 1;  # save as a key to generate a unique set
     }
     # Add the implied backup clone entry, if one.
-    if (exists($v->{bk})) {
+    if (exists($v->{bk}) && $v->{bk} != 0) {
         my $r = $rw[0];  # the rw site, from the grep above
         my $b = {serv=>$r->{serv}, part=>$r->{part}, parent=>$r->{parent},
                  id=>$v->{bk}, type=>"BK", name=>volname($r->{name}, "BK") };
@@ -857,8 +860,12 @@ sub vos_listvol
         }
         if ($opt_level < 2) {
             if (/^(\d+)\s*$/) {
-                my $v = {serv=>$server, part=>$part, id=>$1};
-                push(@{ $vol->{list} }, $v);
+                if ($1 == 0) {
+                    warn "vol: volume id is zero: $server:$part\n";
+                } else {
+                    my $v = {serv=>$server, part=>$part, id=>$1};
+                    push(@{ $vol->{list} }, $v);
+                }
             }
             next;
         }
@@ -901,6 +908,10 @@ sub vos_listvol
                 next;
             }
             if (/^(name|id|type|serv|status)\s+(\S+)/) {
+                if ($1 eq "id" && $2 == 0) {
+                    warn "vol: volume id is zero on server $server\n";
+                    next;
+                }
                 $v->{$1} = $2;
                 next;
             }
@@ -1085,6 +1096,10 @@ sub site_string
 sub site_key
 {
     my $site = shift;
+    validate(exists($site->{serv}), "site is missing 'serv': ". site_string($site));
+    validate(exists($site->{part}), "site is missing 'part': ". site_string($site));
+    validate(exists($site->{id}), "site is missing 'id': ". site_string($site));
+    validate($site->{id} != 0, "site id is zero: ". site_string($site));
     return sprintf("%s:%s:%d", $site->{serv}, $site->{part}, $site->{id});
 }
 
