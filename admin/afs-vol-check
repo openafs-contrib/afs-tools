@@ -493,7 +493,7 @@ sub fail
 #------------------------------------------------------------------
 # Validate an expression or exit with an error.
 #
-sub validate
+sub assert
 {
     my $expr = shift;
     my $msg = shift;
@@ -566,22 +566,22 @@ sub vldb_add_entry
     my $v = shift;
 
     # sanity checks
-    validate(exists($v->{name}),   "vldb: volume name missing");
+    assert(exists($v->{name}),   "vldb: volume name missing");
 
     my $name = $v->{name};
-    validate(exists($v->{rw}),     "vldb: read/write volume id missing: $name");
-    validate($v->{rw} != 0,        "vldb: read/write volume id is zero: $name");
+    assert(exists($v->{rw}),     "vldb: read/write volume id missing: $name");
+    assert($v->{rw} != 0,        "vldb: read/write volume id is zero: $name");
 
-    validate(exists($v->{sites}),  "vldb: sites missing: $name");
-    validate(exists($v->{nsites}), "vldb: number of sites missing: $name");
+    assert(exists($v->{sites}),  "vldb: sites missing: $name");
+    assert(exists($v->{nsites}), "vldb: number of sites missing: $name");
 
     my $n = scalar(@{$v->{sites}});
-    validate($n > 0,               "vldb: no sites found: $name");
-    validate($n == $v->{nsites},   "vldb: not all sites found: $name");
+    assert($n > 0,               "vldb: no sites found: $name");
+    assert($n == $v->{nsites},   "vldb: not all sites found: $name");
 
     my @rw = grep {$_->{type} eq "RW"} @{$v->{sites}};
-    validate(scalar(@rw) != 0, "vldb: no read/write site found: $name");
-    validate(scalar(@rw) == 1, "vldb: multiple read/write sites found: $name");
+    assert(scalar(@rw) != 0, "vldb: no read/write site found: $name");
+    assert(scalar(@rw) == 1, "vldb: multiple read/write sites found: $name");
 
     # Save the sites to the sites list and the servers to the servers list.
     foreach my $s (@{ $v->{sites} }) {
@@ -1096,10 +1096,10 @@ sub site_string
 sub site_key
 {
     my $site = shift;
-    validate(exists($site->{serv}), "site is missing 'serv': ". site_string($site));
-    validate(exists($site->{part}), "site is missing 'part': ". site_string($site));
-    validate(exists($site->{id}), "site is missing 'id': ". site_string($site));
-    validate($site->{id} != 0, "site id is zero: ". site_string($site));
+    assert(exists($site->{serv}), "site is missing 'serv': ". site_string($site));
+    assert(exists($site->{part}), "site is missing 'part': ". site_string($site));
+    assert(exists($site->{id}), "site is missing 'id': ". site_string($site));
+    assert($site->{id} != 0, "site id is zero: ". site_string($site));
     return sprintf("%s:%s:%d", $site->{serv}, $site->{part}, $site->{id});
 }
 
