@@ -112,11 +112,21 @@ file server when B<--level> is set to 1.
 Search for volumes which have an entry in the vldb but are not
 found on the fileserver.
 
-=item stray volumes
+=item orphan volumes
 
 Search for volumes which were found on the fileserver but do not
-have an entry in the vldb or were found in a location which
-does not match the vldb entry.
+have an entry in the vldb.
+
+=item stray volumes
+
+Search for volumes which have vldb entry, but are not located
+at the site indicated by the vldb entry (and the site indicated by
+the vldb entry does not contain the same volume id).
+
+=item rogue volumes
+
+Search for volumes which have a duplicate volume id with a
+volume that has a vldb entry.
 
 =back
 
@@ -150,8 +160,9 @@ use strict;
 use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
+use Data::Dumper;
 
-our $VERSION = "1.05";
+our $VERSION = "1.06";
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -258,6 +269,23 @@ sub check_for_missing_volumes
 }
 
 #------------------------------------------------------------------
+#
+# Walk the list of volumes found on the file servers. Check for a matching
+# vldb site entry for each volume.
+#
+# If no vldb entries exist for a volume id, the volume is called "orphaned".
+# A vldb site entry can be made to refer to the orphaned volume. (The method
+# depends on the volume type.)
+#
+# If all the vldb site entries for the volume (id, type) are "broken links"
+# (that is there are no volumes located at the sites pointed to by the
+# vldb entries) the volume is called "stray".  The vldb site entry can be
+# updated to point to the stray volume.
+#
+# If at least one unbroken vldb site entry exists for the volume (id, type),
+# this volume is called "rogue".  It could be an old version of the volume
+# which is currently in use.
+#
 sub check_for_stray_volumes
 {
     if ($opt_level < 1) {
@@ -268,17 +296,42 @@ sub check_for_stray_volumes
     my $vldb = shift;
     my $vols = shift;
     my $db = sites_hash($vldb->{sites}, "vldb");
+
+    # first pass: find unbroken vldb entries for stray vs rogue warnings.
     foreach my $site (@{ $vols->{list} }) {
         my $key = site_key($site);
-        unless (exists($db->{$key})) {
-            # name is not available when vos listvol was
-            # run with the -fast option.
-            my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
-            fail("stray volume: $vol at $site->{serv} $site->{part}");
-            $site->{stray} = 1;
+        if ($db->{$key}) {
+            my $vs = $db->{$key};
+            $vs->{child} = $site;
+            $site->{parent} = $vs;
+        }
+    }
+
+    # second pass: find orhaned/stray/rogue volumes
+    foreach my $site (@{ $vols->{list} }) {
+        unless ($site->{parent}) {
+            my $vol = site_string($site);
+            my $inuse = "";
+            my $warn = "";
+            my $id = $site->{id};
+            if ($vldb->{numbers}->{$id}) {
+                # Get the list of vldb sites for this volume id. If at least
+                # one of them is not broken, then this is called a "rogue".
+                my @vs = grep {$_->{id} eq $id} @{ $vldb->{numbers}->{$id}->{sites} };
+                my @c = grep { $_->{child} } @vs;
+                my @a = map { "$_->{serv}:$_->{part}" } @vs;
+
+                $warn = scalar(@c) ? "rogue" : "stray";
+                $inuse = scalar(@a) ? "; in use ". join(", ", @a) : "";
+            }
+            else {
+                $warn = "orphan";
+            }
+            fail("$warn volume: $vol at $site->{serv}:$site->{part}". $inuse);
         }
     }
 }
+
 
 #------------------------------------------------------------------
 sub check_for_broken_volume_names
@@ -302,7 +355,7 @@ sub check_for_broken_volume_names
                      "at $site->{serv} $site->{part}");
             }
             if ($site->{type} && ($v->{type} ne $site->{type})) {
-                my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
+                my $vol = site_string($site);
                 fail("type mismatch: $vol ".
                      "$site->{type} should be $v->{type} ".
                      "at $site->{serv} $site->{part}");
@@ -401,7 +454,7 @@ sub check_for_offline_volumes
     info("checking for offline volumes ...");
     foreach my $site (@{ $vols->{list} }) {
         if ($site->{status} ne "OK") {
-            my $vol = $site->{name} ? "$site->{name} ($site->{id})" : $site->{id};
+            my $vol = site_string($site);
             fail("volume offline: $vol at $site->{serv} $site->{part}");
         }
     }
@@ -1008,6 +1061,22 @@ sub cell_vos_status
         vos_status($tx, $server);
     }
     return $tx;
+}
+
+#------------------------------------------------------------------
+# Format a human readable string for the site.
+#
+sub site_string
+{
+    my $site = shift;
+    # name and type is not available when vos listvol was
+    # run with the -fast option.
+    if ($site->{name} && $site->{type}) {
+        return "$site->{name} ($site->{id}) [". lc($site->{type}) ."]";
+    } elsif ($site->{name}) {
+        return "$site->{name} ($site->{id})";
+    }
+    return "$site->{id}";
 }
 
 #------------------------------------------------------------------
