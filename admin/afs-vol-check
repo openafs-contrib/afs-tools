@@ -248,7 +248,7 @@ sub dir_empty
 #------------------------------------------------------------------
 sub check_for_missing_volumes
 {
-    if ($opt_level < 1) {
+    unless ($opt_level >= 1) {
         info("skipping missing volumes checks.");
         return;
     }
@@ -288,7 +288,7 @@ sub check_for_missing_volumes
 #
 sub check_for_stray_volumes
 {
-    if ($opt_level < 1) {
+    unless ($opt_level >= 1) {
         info("skipping stray volumes checks.");
         return;
     }
@@ -336,7 +336,7 @@ sub check_for_stray_volumes
 #------------------------------------------------------------------
 sub check_for_broken_volume_names
 {
-    if ($opt_level < 2) {
+    unless ($opt_level >= 2) {
         info("skipping volume names and types checks.");
         return;
     }
@@ -446,7 +446,7 @@ sub check_for_offline_volumes
     my $vldb = shift;
     my $vols = shift;
 
-    if ($opt_level < 2) {
+    unless ($opt_level >= 2) {
         info("skipping offline volume checks.");
         return;
     }
@@ -805,11 +805,11 @@ sub vos_listvol
     my $errormsg = "";
 
     my $options = "-server $server -noauth -noresolve";
-    if ($opt_level < 2) {
-        $options .= " -fast";
+    if ($opt_level >= 2) {
+        $options .= " -format";  # slowest, all volume headers
     }
     else {
-        $options .= " -format";
+        $options .= " -fast";    # faster, just the volume ids
     }
     if ($opt_cell) {
         $options .= " -cell $opt_cell";
@@ -858,7 +858,7 @@ sub vos_listvol
             push(@{ $vol->{unattached} }, $1);
             next;
         }
-        if ($opt_level < 2) {
+        if ($options =~ /\-fast/) {
             if (/^(\d+)\s*$/) {
                 if ($1 == 0) {
                     warn "vol: volume id is zero: $server:$part\n";
@@ -939,7 +939,7 @@ sub cell_vos_listvol
         busy => [],
         unattached => [],
     };
-    if ($opt_level < 1) {
+    unless ($opt_level >= 1) {
         return undef;
     }
     foreach my $server (@{ $servers }) {
