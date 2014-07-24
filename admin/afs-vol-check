@@ -162,7 +162,7 @@ use Pod::Usage;
 use Time::Local;
 use Data::Dumper;
 
-our $VERSION = "1.06";
+our $VERSION = "1.07";
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -201,7 +201,7 @@ if ($opt_save) {
     unless (-d $opt_save) {
         die "--save: directory does not exist: $opt_save\n";
     }
-    unless (dir_empty($opt_save)) {
+    unless (is_dir_empty($opt_save)) {
         die "--save: directory is not empty: $opt_save\n";
     }
 }
@@ -230,14 +230,14 @@ sub main
 
 #------------------------------------------------------------------
 # Returns true if directory is empty.
-sub dir_empty
+sub is_dir_empty
 {
     my $path = shift;
 
     opendir(my $dir, $path) or die "Failed to open $path: $!\n";
-    while (readdir($dir)) {
-        next if /^[.]\z/;
-        next if /^[.][.]\z/;
+    while (my $dent = readdir($dir)) {  # older versions of perl dont set $_
+        next if $dent =~ /^[.]\z/;
+        next if $dent =~ /^[.][.]\z/;
         closedir($dir);
         return 0;
     }
