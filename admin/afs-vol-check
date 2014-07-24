@@ -160,7 +160,6 @@ use strict;
 use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
-use Data::Dumper;
 
 our $VERSION = "1.08";
 
@@ -258,7 +257,7 @@ sub check_for_missing_volumes
     my $sv = sites_hash($vols->{list},  "server");
     foreach my $site (@{ $vldb->{sites} }) {
         my $key = site_key($site);
-        unless (exists($sv->{$key})) {
+        unless ($key && exists($sv->{$key})) {
             # Do not report sites which have not been released yet as missing.
             unless ($site->{type} eq "RO" && $site->{flag}) {
                 check_failed("missing volume: $site->{name} ($site->{id}) at $site->{serv} $site->{part}");
@@ -300,7 +299,7 @@ sub check_for_stray_volumes
     # first pass: find unbroken vldb entries for stray vs rogue warnings.
     foreach my $site (@{ $vols->{list} }) {
         my $key = site_key($site);
-        if ($db->{$key}) {
+        if ($key && $db->{$key}) {
             my $vs = $db->{$key};
             $vs->{child} = $site;
             $site->{parent} = $vs;
@@ -346,7 +345,7 @@ sub check_for_broken_volume_names
     my $db = sites_hash($vldb->{sites}, "vldb");
     foreach my $site (@{ $vols->{list} }) {
         my $key = site_key($site);
-        if (exists($db->{$key})) {
+        if ($key && exists($db->{$key})) {
             my $v = $db->{$key};
 
             if ($site->{name} && ($v->{name} ne $site->{name})) {
@@ -769,15 +768,14 @@ sub vos_listvldb
                 $id = $v->{rw};
             }
             elsif ($type eq "RO") {
-                if (defined($v->{ro})) {
+                if ($v->{ro}) {
                     $id = $v->{ro};
                 }
-                elsif ($flag eq REL_NOT) {
-                    $id = 0; # ro volume not created yet
-                }
                 else {
-                    $errors++;
-                    error("vldb: error reading listvldb: ro id not found: $v->{name}");
+                    unless ($flag eq REL_NOT) { # ro volume not created yet
+                        $errors++;
+                        error("vldb: error reading listvldb: ro id not found: $v->{name}");
+                    }
                 }
             }
             else {
@@ -785,7 +783,10 @@ sub vos_listvldb
                 error("vldb: error reading listvldb: unexpected volume type: $v->{name}");
             }
             my $vs = {serv=>$server, part=>$part, parent=>$parent,
-                      id=>$id, type=>$type, name=>volname($v->{name}, $type)};
+                      type=>$type, name=>volname($v->{name}, $type)};
+            if ($id) {
+                $vs->{id} = $id; # id is not available for ro sites before the first release.
+            }
             if ($flag) {
                 $v->{rflags} |= $flag;
                 $vs->{flag} = $flag;
@@ -1115,12 +1116,21 @@ sub site_string
     my $site = shift;
     # name and type is not available when vos listvol was
     # run with the -fast option.
-    if ($site->{name} && $site->{type}) {
-        return "$site->{name} ($site->{id}) [". lc($site->{type}) ."]";
-    } elsif ($site->{name}) {
-        return "$site->{name} ($site->{id})";
-    }
-    return "$site->{id}";
+    return sprintf("%s (%s) [%s]",
+        $site->{name} ? $site->{name} : "<unknown>",
+        $site->{id} ? $site->{id} : "<unknown>",
+        $site->{type} ? lc($site->{type}) : "??");
+}
+
+#------------------------------------------------------------------
+# Format the site location string.
+#
+sub site_location
+{
+    my $site = shift;
+    return sprintf("at %s:%s",
+        $site->{serv} ? $site->{serv} : "<unknown>",
+        $site->{part} ? $site->{part} : "?");
 }
 
 #------------------------------------------------------------------
@@ -1129,6 +1139,10 @@ sub site_string
 sub site_key
 {
     my $site = shift;
+    if ($site->{flag} && $site->{flag} == REL_NOT) {
+       info("skipping unreleased site: ". site_string($site) ." ". site_location($site));
+       return undef;
+    }
     assert(exists($site->{serv}), "site is missing 'serv': ". site_string($site));
     assert(exists($site->{part}), "site is missing 'part': ". site_string($site));
     assert(exists($site->{id}), "site is missing 'id': ". site_string($site));
@@ -1147,6 +1161,7 @@ sub sites_hash
 
     foreach my $site (@{ $sites }) {
         my $key = site_key($site);
+        next unless $key;
         if (exists($hash->{$key})) {
             unless ($hash->{$key}->{dupwarn}) {
                 check_failed("$source: duplicate volume detected: $key");
