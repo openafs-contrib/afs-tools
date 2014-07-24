@@ -162,7 +162,7 @@ use Pod::Usage;
 use Time::Local;
 use Data::Dumper;
 
-our $VERSION = "1.07";
+our $VERSION = "1.08";
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -195,14 +195,14 @@ if ($opt_version) {
     exit(0);
 }
 if ($opt_save and $opt_offline) {
-    die "Cannot run with --save and --offline.\n";
+    fatal("Cannot run with --save and --offline.");
 }
 if ($opt_save) {
     unless (-d $opt_save) {
-        die "--save: directory does not exist: $opt_save\n";
+        fatal("--save: directory does not exist: $opt_save");
     }
     unless (is_dir_empty($opt_save)) {
-        die "--save: directory is not empty: $opt_save\n";
+        fatal("--save: directory is not empty: $opt_save");
     }
 }
 
@@ -234,7 +234,7 @@ sub is_dir_empty
 {
     my $path = shift;
 
-    opendir(my $dir, $path) or die "Failed to open $path: $!\n";
+    opendir(my $dir, $path) or die "FATAL: Failed to open $path: $!";
     while (my $dent = readdir($dir)) {  # older versions of perl dont set $_
         next if $dent =~ /^[.]\z/;
         next if $dent =~ /^[.][.]\z/;
@@ -261,7 +261,7 @@ sub check_for_missing_volumes
         unless (exists($sv->{$key})) {
             # Do not report sites which have not been released yet as missing.
             unless ($site->{type} eq "RO" && $site->{flag}) {
-                fail("missing volume: $site->{name} ($site->{id}) at $site->{serv} $site->{part}");
+                check_failed("missing volume: $site->{name} ($site->{id}) at $site->{serv} $site->{part}");
                 $site->{missing} = 1;
             }
         }
@@ -327,7 +327,7 @@ sub check_for_stray_volumes
             else {
                 $warn = "orphan";
             }
-            fail("$warn volume: $vol at $site->{serv}:$site->{part}". $inuse);
+            check_failed("$warn volume: $vol at $site->{serv}:$site->{part}". $inuse);
         }
     }
 }
@@ -350,13 +350,13 @@ sub check_for_broken_volume_names
             my $v = $db->{$key};
 
             if ($site->{name} && ($v->{name} ne $site->{name})) {
-                fail("name mismatch: $site->{name} ($site->{id}) ".
+                check_failed("name mismatch: $site->{name} ($site->{id}) ".
                      "should be $v->{name} ".
                      "at $site->{serv} $site->{part}");
             }
             if ($site->{type} && ($v->{type} ne $site->{type})) {
                 my $vol = site_string($site);
-                fail("type mismatch: $vol ".
+                check_failed("type mismatch: $vol ".
                      "$site->{type} should be $v->{type} ".
                      "at $site->{serv} $site->{part}");
             }
@@ -381,10 +381,10 @@ sub check_for_stale_locks
         }
         $v->{stalelock} = 1;
         if ($v->{op}) {
-            fail("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
+            check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
         }
         else {
-            fail("possible stale lock: $v->{name} ($v->{rw})");
+            check_failed("possible stale lock: $v->{name} ($v->{rw})");
         }
     }
 }
@@ -403,10 +403,10 @@ sub check_for_failed_releases
                 info("release in progress: $v->{name} $v->{rw}");
             }
             elsif ($v->{rflags} == REL_NOT) {
-                fail("not released: $v->{name} $v->{rw}");
+                check_failed("not released: $v->{name} $v->{rw}");
             }
             else {
-                fail("failed release: $v->{name} $v->{rw}");
+                check_failed("failed release: $v->{name} $v->{rw}");
             }
         }
     }
@@ -424,7 +424,7 @@ sub check_for_missing_ro_clone_site
             # get the rw site. (The presence of one rw site was
             # checked when $vldb was created, so assert if missing.)
             my ($rw) = grep { $_->{type} eq "RW" } @{ $v->{sites} };
-            die "vldb: missing read/write site: $v->{name} ($v->{rw})" unless $rw;
+            die "FATAL: vldb: missing read/write site: $v->{name} ($v->{rw})" unless $rw;
 
             # Complain if the read-only clone entry is missing.
             # Cross-device link errors are checked before this routine.
@@ -433,7 +433,7 @@ sub check_for_missing_ro_clone_site
                 $_->{part} eq $rw->{part}
             } @ro;
             unless ($rc) {
-                fail("addsite needed: $v->{name} ($v->{rw}) at ".
+                check_failed("addsite needed: $v->{name} ($v->{rw}) at ".
                      "$rw->{serv} $rw->{part}");
             }
         }
@@ -455,7 +455,7 @@ sub check_for_offline_volumes
     foreach my $site (@{ $vols->{list} }) {
         if ($site->{status} ne "OK") {
             my $vol = site_string($site);
-            fail("volume offline: $vol at $site->{serv} $site->{part}");
+            check_failed("volume offline: $vol at $site->{serv} $site->{part}");
         }
     }
     foreach my $id (@{ $vols->{busy} }) {
@@ -463,10 +463,10 @@ sub check_for_offline_volumes
         if ($v && $v->{locked} && !$v->{stalelock}) {
             next;  # skip warning if a transaction is in progress
         }
-        fail("volume busy: $id");
+        check_failed("volume busy: $id");
     }
     foreach my $id (@{ $vols->{unattached} }) {
-        fail("volume attach error: $id");
+        check_failed("volume attach error: $id");
     }
 }
 
@@ -477,17 +477,50 @@ sub info
 {
     if ($opt_verbose) {
         my $msg = shift;
-        printf("info: %s\n", $msg);
+        chomp($msg);
+        print "INFO: $msg\n";
     }
 }
 
 #------------------------------------------------------------------
-# A check failed.
+# Print a warning message to stdout.
 #
-sub fail
+sub warning
 {
     my $msg = shift;
-    print "WARNING: ". $msg ."\n";
+    chomp($msg);
+    print "WARNING: $msg\n";
+}
+
+#------------------------------------------------------------------
+# Print a error message to stderr.
+#
+sub error
+{
+    my $msg = shift;
+    chomp($msg);
+    print STDERR "ERROR: $msg\n";
+}
+
+#------------------------------------------------------------------
+# Print a fatal error message to stderr and exit.
+#
+# Use this sub if the line number of the caller is not needed.
+#
+sub fatal
+{
+    my $msg = shift;
+    chomp($msg);
+    die "FATAL: $msg\n";
+}
+
+#------------------------------------------------------------------
+# A check failed, print a warning.
+#
+sub check_failed
+{
+    my $msg = shift;
+    warning($msg);
 }
 
 #------------------------------------------------------------------
@@ -497,7 +530,7 @@ sub assert
 {
     my $expr = shift;
     my $msg = shift;
-    $expr or die $msg ."\n";
+    $expr or die "ASSERT: $msg\n";
 }
 
 #------------------------------------------------------------------
@@ -515,12 +548,12 @@ sub parse_date
     if (my ($m, $day, $hour, $min, $sec, $year)=($string=~
         /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/)) {
         if (!exists($months->{$m})) {
-            die "parse_date: invalid month: $m";
+            die "FATAL: parse_date: invalid month: $m";
         }
         my $time = timelocal($sec, $min, $hour, $day, $months->{$m}, $year);
         return $time;
     }
-    die "parse_date: invalid date string: $string";
+    die "FATAL: parse_date: invalid date string: $string";
 }
 
 #------------------------------------------------------------------
@@ -548,7 +581,7 @@ sub vldb_add_parent_id
     if ($id != 0) {
         if (exists($vldb->{parents}->{$id})) {
             unless ($vldb->{parents}->{$id} == $parent) {
-               warn("vldb: conflicting parent id numbers for volume $id");
+               error("vldb: conflicting parent id numbers for volume $id");
             }
         }
         else {
@@ -599,13 +632,13 @@ sub vldb_add_entry
     # Save the volume info by name and number.
     my $id = $v->{rw};
     if (exists($vldb->{names}->{$name})) {
-        warn("vldb: duplicate volume name: $name\n");
+        error("vldb: duplicate volume name: $name");
     }
     else {
         $vldb->{names}->{$name} = $v;
     }
     if (exists($vldb->{numbers}->{$id})) {
-        warn("vldb: duplicate volume number: $id\n");
+        error("vldb: duplicate volume number: $id");
     }
     else {
         $vldb->{numbers}->{$id} = $v;
@@ -659,17 +692,17 @@ sub vos_listvldb
     if ($opt_offline) {
         my $file = "$opt_offline/listvldb";
         info("reading: $file");
-        open($vos, "<", $file) or die "Failed to open $file: $!";
+        open($vos, "<", $file) or die "FATAL: Failed to open $file: $!";
         $errormsg = "failed closing $file";
     } else {
         my $cmd = "vos listvldb $options";
         info("running: ". $cmd);
-        open($vos, "$cmd |") or die "Failed to run $cmd: $!";
+        open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
         if ($opt_save) {
             my $file = "$opt_save/listvldb";
             info("saving to file $file");
-            open($save, ">", $file) or die "Failed to open $file: $!";
+            open($save, ">", $file) or die "FATAL: Failed to open $file: $!";
         }
     }
 
@@ -688,14 +721,14 @@ sub vos_listvldb
                 };
                 if ($@) {
                     $errors++;
-                    warn $@;
+                    error($@);
                 }
             }
             $v = {name=>$1, sites=>[], locked=>0};
             next;
         }
         unless (defined($v) && exists($v->{name})) {
-            die "vldb: error reading listvldb";
+            die "FATAL: vldb: error reading listvldb";
         }
         if (/^\s+(RWrite|ROnly|Backup|RClone):/) {
             if (/RWrite:\s+(\d+)/) {
@@ -744,12 +777,12 @@ sub vos_listvldb
                 }
                 else {
                     $errors++;
-                    warn "vldb: error reading listvldb: ro id not found: $v->{name}";
+                    error("vldb: error reading listvldb: ro id not found: $v->{name}");
                 }
             }
             else {
                 $errors++;
-                warn "vldb: error reading listvldb: unexpected volume type: $v->{name}";
+                error("vldb: error reading listvldb: unexpected volume type: $v->{name}");
             }
             my $vs = {serv=>$server, part=>$part, parent=>$parent,
                       id=>$id, type=>$type, name=>volname($v->{name}, $type)};
@@ -775,17 +808,17 @@ sub vos_listvldb
         };
         if ($@) {
             $errors++;
-            warn $@;
+            error($@);
         }
     }
     $vldb->{servers} = [keys(%{ $vldb->{servers} })];
     close($vos);
     unless ($? == 0) {
         $errors++;
-        warn "vos listvldb failed: code=$?";
+        error("vos listvldb failed: code=$?");
     }
     if ($errors) {
-        die "Errors while reading vldb.\n";
+        die "FATAL: Errors while reading vldb.";
     }
     return $vldb;
 }
@@ -820,13 +853,13 @@ sub vos_listvol
             $file .= ".fast";
         }
         info("reading: $file");
-        open($vos, "<", $file) or die "Failed to read offline file $file: $!";
+        open($vos, "<", $file) or die "FATAL: Failed to read offline file $file: $!";
         $errormsg = "failed closing $file";
     }
     else {
         my $cmd = "vos listvol $options";
         info("running: ". $cmd);
-        open($vos, "$cmd |") or die "Failed to run $cmd: $!";
+        open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
         if ($opt_save) {
             my $file = "$opt_save/$server.listvol";
@@ -834,7 +867,7 @@ sub vos_listvol
                 $file .= ".fast";
             }
             info("saving to file $file");
-            open($save, ">", $file) or die "Failed to open $file: $!";
+            open($save, ">", $file) or die "FATAL: Failed to open $file: $!";
         }
     }
 
@@ -861,7 +894,7 @@ sub vos_listvol
         if ($options =~ /\-fast/) {
             if (/^(\d+)\s*$/) {
                 if ($1 == 0) {
-                    warn "vol: volume id is zero: $server:$part\n";
+                    error("vol: volume id is zero: $server:$part");
                 } else {
                     my $v = {serv=>$server, part=>$part, id=>$1};
                     push(@{ $vol->{list} }, $v);
@@ -884,14 +917,14 @@ sub vos_listvol
                 foreach my $k (qw(id serv status)) {
                     unless (exists $v->{$k}) {
                         $ok = 0;
-                        warn "vol: missing $k field in listvol\n";
+                        error("vol: missing $k field in listvol");
                     }
                 }
                 if (exists $v->{status}) {
                     if ($v->{status} eq "OK") {
                         foreach my $k (qw(name type)) {
                             unless (exists $v->{$k}) {
-                                warn "vol: missing $k field in listvol\n";
+                                error("vol: missing $k field in listvol");
                             }
                         }
                     }
@@ -909,7 +942,7 @@ sub vos_listvol
             }
             if (/^(name|id|type|serv|status)\s+(\S+)/) {
                 if ($1 eq "id" && $2 == 0) {
-                    warn "vol: volume id is zero on server $server\n";
+                    error("vol: volume id is zero on server $server");
                     next;
                 }
                 $v->{$1} = $2;
@@ -920,11 +953,11 @@ sub vos_listvol
             }
             next;
         }
-        die "vol: error reading listvol for server $server: $_";
+        die "FATAL: vol: error reading listvol for server $server: $_";
     }
     close($vos);
     unless ($? == 0) {
-        die "$errormsg: code=$?";
+        die "FATAL: $errormsg: code=$?";
     }
 }
 
@@ -982,18 +1015,18 @@ sub vos_status
     if ($opt_offline) {
         my $file = "$opt_offline/$server.status";
         info("reading: $file");
-        open($vos, "<", $file) or die "Failed to open offline file $file: $!";
+        open($vos, "<", $file) or die "FATAL: Failed to open offline file $file: $!";
         $errormsg = "failed closing $file";
     }
     else {
         my $cmd = "vos status $options";
         info("running: ". $cmd);
-        open($vos, "$cmd |") or die "Failed to run $cmd: $!";
+        open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
         if ($opt_save) {
             my $file = "$opt_save/$server.status";
             info("saving to file $file");
-            open($save, ">", $file) or die "Failed to open $file: $!";
+            open($save, ">", $file) or die "FATAL: Failed to open $file: $!";
         }
     }
 
@@ -1054,10 +1087,10 @@ sub vos_status
     }
     close($vos);
     unless ($? == 0) {
-        die "$errormsg: code=$?";
+        die "FATAL: $errormsg: code=$?";
     }
     if ($total != $count) {
-        die "failed to read all of the transactions from vos status.";
+        die "FATAL: failed to read all of the transactions from vos status.";
     }
 }
 
@@ -1116,7 +1149,7 @@ sub sites_hash
         my $key = site_key($site);
         if (exists($hash->{$key})) {
             unless ($hash->{$key}->{dupwarn}) {
-                fail("$source: duplicate volume detected: $key");
+                check_failed("$source: duplicate volume detected: $key");
                 $hash->{$key}->{dupwarn} = 1;
             }
         }
