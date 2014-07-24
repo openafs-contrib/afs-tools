@@ -161,7 +161,8 @@ use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
 
-our $VERSION = "1.08";
+our $VERSION = "1.09";
+our $VOS; # /<path>/vos
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -202,6 +203,18 @@ if ($opt_save) {
     }
     unless (is_dir_empty($opt_save)) {
         fatal("--save: directory is not empty: $opt_save");
+    }
+}
+unless ($opt_offline) {
+    # Search for the vos command, first in the PATH, then in some
+    # common hiding places. Use the first one found.
+    ($VOS) = grep { -x $_ } map { $_ ."/vos" } (
+        split(/:/, $ENV{PATH}),
+        qw(/usr/afs/bin /usr/afsws/bin /usr/afsws/etc),
+        qw(/usr/bin /usr/sbin /usr/local/bin /usr/local/sbin),
+    );
+    unless ($VOS) {
+        fatal("Failed to find the vos command.");
     }
 }
 
@@ -694,7 +707,7 @@ sub vos_listvldb
         open($vos, "<", $file) or die "FATAL: Failed to open $file: $!";
         $errormsg = "failed closing $file";
     } else {
-        my $cmd = "vos listvldb $options";
+        my $cmd = "$VOS listvldb $options";
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
@@ -858,7 +871,7 @@ sub vos_listvol
         $errormsg = "failed closing $file";
     }
     else {
-        my $cmd = "vos listvol $options";
+        my $cmd = "$VOS listvol $options";
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
@@ -1020,7 +1033,7 @@ sub vos_status
         $errormsg = "failed closing $file";
     }
     else {
-        my $cmd = "vos status $options";
+        my $cmd = "$VOS status $options";
         info("running: ". $cmd);
         open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
