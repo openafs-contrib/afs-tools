@@ -402,10 +402,10 @@ sub check_for_failed_releases
                 info("release in progress: $v->{name} $v->{rw}");
             }
             elsif ($v->{rflags} == REL_NOT) {
-                check_failed("not released: $v->{name} $v->{rw}");
+                check_failed("not released: $v->{name} ($v->{rw})");
             }
             else {
-                check_failed("failed release: $v->{name} $v->{rw}");
+                check_failed("failed release: $v->{name} ($v->{rw})");
             }
         }
     }
