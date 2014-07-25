@@ -834,6 +834,7 @@ sub vos_listvldb
     if ($errors) {
         die "FATAL: Errors while reading vldb.";
     }
+    close $save if $save;
     return $vldb;
 }
 
@@ -973,6 +974,7 @@ sub vos_listvol
     unless ($? == 0) {
         die "FATAL: $errormsg: code=$?";
     }
+    close $save if $save;
 }
 
 #------------------------------------------------------------------
@@ -1106,6 +1108,7 @@ sub vos_status
     if ($total != $count) {
         die "FATAL: failed to read all of the transactions from vos status.";
     }
+    close $save if $save;
 }
 
 #------------------------------------------------------------------
