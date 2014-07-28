@@ -1,0 +1,75 @@
+#!/usr/bin/perl -w
+# Copyright (c) 2014, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#------------------------------------------------------------------------
+#
+# Calculate stack usage from object dumps (x86_64 only)
+#
+# usage: objdump --disassemble <file>.o | stack-usage
+#
+# Example:
+#
+#    cd src/openafs/src/libafs/MODLOAD-3.2.0-4-amd64-MP
+#    objdump --disassemble *.o | stack-usage | sort -u | sort -k 2 -n
+#
+# Credits:
+#
+#    Based on stack_usage.pl by Chas Williams.
+#    Overhead calculation by Gergely Madarasz.
+#
+
+use strict;
+use warnings;
+no warnings 'portable';  # usage values are 64-bit ints
+
+my $func = "";
+my $printed = 0;
+my $overhead = 0;
+my $usage = 0;
+
+while(<>) {
+    chop;
+    /:$/ && do {
+        if ($func && !$printed) {
+            printf("%s\t%d\n", $func, $overhead);
+        }
+        ($func) = /.*<([\w\.]+)>:/;
+        $overhead = 8;
+        $printed = 0;
+    };
+
+    /push\s+%/ && do {
+        $overhead += 8;
+    };
+
+    /sub\s+\$0x([0-9a-f]+),%[re]sp/ && do {
+        $usage = hex($1);
+        if ($usage) {
+            printf("%s\t%d\n", $func, $usage + $overhead);
+            $printed = 1;
+        };
+    };
+
+    /add\s+\$0x([0-9a-f]+),%[re]sp/ && do {
+        # check for adding a negative
+        $usage = sprintf("%d", hex($1)); # convert to signed int
+        if ($usage < 0) {
+            $usage = -1 * $usage;  # get absolute value
+            if ($usage) {
+                printf("%s\t%d\n", $func, $usage + $overhead);
+                $printed = 1;
+            };
+        }
+    };
+}
