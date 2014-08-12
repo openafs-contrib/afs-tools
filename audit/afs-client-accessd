@@ -695,7 +695,8 @@ sqlite_dbopen($)
 	my $dbh = DBI->connect("dbi:SQLite:dbname=$filename",
 	                       '', # username
 	                       '', # password
-	                       { AutoCommit => 0, RaiseError => 1 }
+	                       { AutoCommit => 0, RaiseError => 1,
+	                         InactiveDestroy => 1 }
 	) or die("Error opening sqlite db $filename: $DBI::errstr\n");
 	return $dbh;
 }
@@ -816,7 +817,8 @@ oracle_dbopen()
 	my $dsn = 'dbi:Oracle:'.$CFG{ORACLE_DSN};
 
 	my $dbh = DBI->connect($dsn, $CFG{ORACLE_USER}, $CFG{ORACLE_PASSWORD},
-	                       { AutoCommit => 0, RaiseError => 1}
+	                       { AutoCommit => 0, RaiseError => 1,
+	                         InactiveDestroy => 1 }
 	) or die("Error connecting to $dsn, user $CFG{ORACLE_USER}: $DBI::errstr\n");
 
 	return $dbh;
