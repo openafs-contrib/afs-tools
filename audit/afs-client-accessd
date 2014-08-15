@@ -185,6 +185,15 @@ Example:
 
   MSGRCV_WORKAROUND => 1,
 
+=item USE_FQDN
+
+When set to 1, get the fully qualified domain name (FQDN) of the
+host, instead of the short hostname. On some hosts the hostname
+routine will get back with a short hostname and on some other
+systems it will get back with the FQDN depending on how the name
+resolution is configured. Set USE_FQDN to 1 to always get the
+FQDN. The default is 0.
+
 =item SSH_BINARY
 
 This specifies the command to run for the "ssh" command, which is used when
@@ -430,7 +439,7 @@ use Sys::Syslog qw(openlog syslog);
 use File::stat;
 use Fcntl qw(O_WRONLY O_CREAT O_EXCL);
 use Text::ParseWords;
-use Sys::Hostname;
+use Net::Domain qw(hostname hostfqdn hostdomain);
 use DBI qw(:sql_types);
 use DBD::SQLite;
 # do not 'use DBD::Oracle'; we will "require" it below, after we've ensured
@@ -571,6 +580,7 @@ read_config()
 		# the rest of the SSH_* directives have no defaults
 
 		MSGRCV_WORKAROUND => 0,
+		USE_FQDN => 0,
 	);
 
 	if (!-r $CONFIG_FILE) {
@@ -995,7 +1005,7 @@ oracle_export(@)
 sub get_hostname()
 {
 	trace();
-	my $hostname = hostname;
+	my $hostname = $CFG{USE_FQDN} ? hostfqdn : hostname;
 	$hostname =~ s/[^0-9a-zA-Z_.-]/_/g;
 	return $hostname;
 }

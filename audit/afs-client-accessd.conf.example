@@ -40,6 +40,14 @@ SQLITE_PREFIX => '/var/afs-accessdb',
 # shows ERESTARTNOHAND errors.
 MSGRCV_WORKAROUND => 0,
 
+# Use the fully qualified domain name of the host.
+# Reason: On some hosts the hostname routine will get back with a
+# short hostname and on some other systems it will get back with the
+# FQDN.  Use the fqdn To be more equal on all systems (doesn't matter
+# how hostname is configured).
+
+USE_FQDN => 0,
+
 #---------------------------------------------------------------------------------
 # Configuration for ssh export mode (--mode ssh).
 #---------------------------------------------------------------------------------
