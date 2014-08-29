@@ -46,6 +46,11 @@ The FID to search in the CacheItems file. Matching dcache indices are displayed
 if found. If the FID is not given, the indices and FIDs for all records which
 have a non-zero FID are displayed.
 
+If any component of the specified FID is 0, that component of the FID is
+ignored when searching for dcache indices to display. For example, searching
+for fid 0.1234.0.0 will search for all entries in volume 1234, regardless of
+cell, vnode, or uniquifier.
+
 =back
 
 =head1 COPYRIGHT
@@ -118,10 +123,10 @@ my $code;
 while (($code = read(CACHEITEMS, $buf, $dataSize)) > 0) {
     my ($cell, $vol, $vnode, $uniq) = unpack("LLLL", $buf);
     if (defined($sfid)) {
-        if (   $cell == $scell
-            && $vol == $svol
-            && $vnode == $svnode
-            && $uniq == $suniq)
+        if (   ($cell == $scell || $scell == 0)
+            && ($vol == $svol || $svol == 0)
+            && ($vnode == $svnode || $svnode == 0)
+            && ($uniq == $suniq || $suniq == 0))
         {
             print "index $index (fid $cell.$vol.$vnode.$uniq)\n";
         }
