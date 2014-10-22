@@ -21,7 +21,7 @@ afs-vol-check
 
 =head1 SYNOPSIS
 
-afs-volcheck [--level=<n>] [--save=<path> | --offline=<path>] [--cell=<cell name>]
+afs-vol-check [--level=<n>] [--save=<path> | --offline=<path>] [--cell=<cell name>]
              [--verbose] [--version] [--help]
 
 =head1 OPTIONS
@@ -163,6 +163,7 @@ use Time::Local;
 
 our $VERSION = "1.09";
 our $VOS; # /<path>/vos
+our $U2A; # uuid to address table
 
 # vldb release flags
 use constant REL_NOT => 1;
@@ -225,10 +226,12 @@ exit main();
 #
 sub main
 {
-    my $vldb = vos_listvldb();
+    my $fs = vos_listaddrs();
+    my $vldb = vos_listvldb($fs);
     my $tx = cell_vos_status($vldb->{servers});
     my $vols = cell_vos_listvol($vldb->{servers});
 
+    $U2A = $vldb->{servers}->{u2a}; # for printing addresses instead of uuids
     check_for_missing_volumes($vldb, $vols);
     check_for_stray_volumes($vldb, $vols);
     check_for_broken_volume_names($vldb, $vols);
@@ -273,7 +276,7 @@ sub check_for_missing_volumes
         unless ($key && exists($sv->{$key})) {
             # Do not report sites which have not been released yet as missing.
             unless ($site->{type} eq "RO" && $site->{flag}) {
-                check_failed("missing volume: $site->{name} ($site->{id}) at $site->{serv} $site->{part}");
+                check_failed("missing volume: $site->{name} ($site->{id}) at ". location($site));
                 $site->{missing} = 1;
             }
         }
@@ -319,7 +322,7 @@ sub check_for_stray_volumes
         }
     }
 
-    # second pass: find orhaned/stray/rogue volumes
+    # second pass: find orphaned/stray/rogue volumes
     foreach my $site (@{ $vols->{list} }) {
         unless ($site->{parent}) {
             my $vol = site_string($site);
@@ -331,15 +334,15 @@ sub check_for_stray_volumes
                 # one of them is not broken, then this is called a "rogue".
                 my @vs = grep {$_->{id} eq $id} @{ $vldb->{numbers}->{$id}->{sites} };
                 my @c = grep { $_->{child} } @vs;
-                my @a = map { "$_->{serv}:$_->{part}" } @vs;
+                my @a = map { location($_) } @vs;
 
                 $warn = scalar(@c) ? "rogue" : "stray";
-                $inuse = scalar(@a) ? "; in use ". join(", ", @a) : "";
+                $inuse = scalar(@a) ? "; in use at ". join(", ", @a) : "";
             }
             else {
                 $warn = "orphan";
             }
-            check_failed("$warn volume: $vol at $site->{serv}:$site->{part}". $inuse);
+            check_failed("$warn volume: $vol at ". location($site) . $inuse);
         }
     }
 }
@@ -364,13 +367,13 @@ sub check_for_broken_volume_names
             if ($site->{name} && ($v->{name} ne $site->{name})) {
                 check_failed("name mismatch: $site->{name} ($site->{id}) ".
                      "should be $v->{name} ".
-                     "at $site->{serv} $site->{part}");
+                     "at ". location($site));
             }
             if ($site->{type} && ($v->{type} ne $site->{type})) {
                 my $vol = site_string($site);
                 check_failed("type mismatch: $vol ".
                      "$site->{type} should be $v->{type} ".
-                     "at $site->{serv} $site->{part}");
+                     "at ". location($site));
             }
         }
     }
@@ -446,7 +449,7 @@ sub check_for_missing_ro_clone_site
             } @ro;
             unless ($rc) {
                 check_failed("addsite needed: $v->{name} ($v->{rw}) at ".
-                     "$rw->{serv} $rw->{part}");
+                    location($rw));
             }
         }
     }
@@ -467,7 +470,7 @@ sub check_for_offline_volumes
     foreach my $site (@{ $vols->{list} }) {
         if ($site->{status} ne "OK") {
             my $vol = site_string($site);
-            check_failed("volume offline: $vol at $site->{serv} $site->{part}");
+            check_failed("volume offline: $vol at ". location($site));
         }
     }
     foreach my $id (@{ $vols->{busy} }) {
@@ -628,10 +631,9 @@ sub vldb_add_entry
     assert(scalar(@rw) != 0, "vldb: no read/write site found: $name");
     assert(scalar(@rw) == 1, "vldb: multiple read/write sites found: $name");
 
-    # Save the sites to the sites list and the servers to the servers list.
+    # Save the sites to the sites list.
     foreach my $s (@{ $v->{sites} }) {
         push(@{ $vldb->{sites} }, $s);
-        $vldb->{servers}->{$s->{serv}} = 1;  # save as a key to generate a unique set
     }
     # Add the implied backup clone entry, if one.
     if (exists($v->{bk}) && $v->{bk} != 0) {
@@ -681,10 +683,83 @@ sub vldb_lookup_entry
 }
 
 #------------------------------------------------------------------
+sub vos_listaddrs
+{
+    my $errors = 0;
+    my $vos;
+    my $save;
+    my $errormsg = "";
+    my $state = 0;
+    my $uuid;
+    my $u2a = {}; # uuid to list of addresses
+    my $a2u = {}; # address to uuid
+
+    my $options = "-noauth -noresolve --printuuid";
+    if ($opt_cell) {
+        $options .= " -cell $opt_cell";
+    }
+    if ($opt_offline) {
+        my $file = "$opt_offline/listaddrs";
+        info("reading: $file");
+        open($vos, "<", $file) or die "FATAL: Failed to open $file: $!";
+        $errormsg = "failed closing $file";
+    } else {
+        my $cmd = "$VOS listaddrs $options";
+        info("running: ". $cmd);
+        open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
+        $errormsg = "failed running: $cmd";
+        if ($opt_save) {
+            my $file = "$opt_save/listaddrs";
+            info("saving to file $file");
+            open($save, ">", $file) or die "FATAL: Failed to open $file: $!";
+        }
+    }
+    while (<$vos>) {
+        print $save $_ if $save;
+        chomp;
+        if ($state == 0) {
+            if (/^UUID: (.*)/) {
+                $uuid = $1;
+                if ($u2a->{$uuid}) {
+                    die "FATAL: duplicate fileserver uuid: $_";
+                }
+                $u2a->{$uuid} = [];
+                $state = 1;
+                next;
+            }
+        }
+        if ($state == 1) {
+            if (/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+                my $addr = $1;
+                if ($a2u->{$addr}) {
+                    die "FATAL: duplicate fileserver address: $_";
+                }
+                push(@{ $u2a->{$uuid} }, $addr);
+                $a2u->{$addr} = $uuid;
+                next;
+            }
+            if (/^$/) {
+                $state = 0;
+                next;
+            }
+        }
+        die "FATAL: error reading listaddr: state=$state, line=$_";
+    }
+    if ($state != 0) {
+        die "FATAL: trailing data while reading listaddr: line=$_";
+    }
+    close($vos);
+    close $save if $save;
+
+    return {u2a=>$u2a, a2u=>$a2u};
+}
+
+#------------------------------------------------------------------
 # Run vos listvldb and read the output.
 #
 sub vos_listvldb
 {
+    my $fs = shift; # file servers; address to uuid, and uuid to address
     my $errors = 0;
     my $vos;
     my $save;
@@ -694,7 +769,11 @@ sub vos_listvldb
         numbers => {},   # hash of info by rw volume numbers
         parents => {},   # hash of parent id by volume id
         sites => [],     # list of rw/ro/bk volume sites
-        servers => {},   # unique list of servers
+        servers => {
+          active=>[],    # uuids of the servers which have volumes
+          u2a=>$fs->{u2a},  # map of uuids to list of ip addresses
+          a2u=>$fs->{a2u},  # map of ip address to uuid
+        },
     };
 
     my $options = "-quiet -noauth -noresolve -nosort";
@@ -762,7 +841,7 @@ sub vos_listvldb
             next;
         }
         if (m{^\s+server (\S+) partition /vicep(\w+) (\w+) Site}) {
-            my ($server, $part, $type) = ($1, $2, $3);
+            my ($addr, $part, $type) = ($1, $2, $3);
             my $parent = $v->{rw};
             my $id;
             my $flag;
@@ -795,7 +874,11 @@ sub vos_listvldb
                 $errors++;
                 error("vldb: error reading listvldb: unexpected volume type: $v->{name}");
             }
-            my $vs = {serv=>$server, part=>$part, parent=>$parent,
+            my $uuid = $fs->{a2u}->{$addr};  # lookup server uuid from ip4v address
+            unless ($uuid) {
+                fatal("vldb: failed to find uuid for server address $addr while reading listvldb");
+            }
+            my $vs = {serv=>$uuid, part=>$part, parent=>$parent,
                       type=>$type, name=>volname($v->{name}, $type)};
             if ($id) {
                 $vs->{id} = $id; # id is not available for ro sites before the first release.
@@ -825,7 +908,11 @@ sub vos_listvldb
             error($@);
         }
     }
-    $vldb->{servers} = [keys(%{ $vldb->{servers} })];
+
+    # Get a unique list of active servers.
+    my %shash = map { $_->{serv} => 1 } @{ $vldb->{sites} };
+    $vldb->{servers}->{active} = [keys(%shash)];
+
     close($vos);
     unless ($? == 0) {
         $errors++;
@@ -847,12 +934,13 @@ sub vos_listvldb
 sub vos_listvol
 {
     my $vol = shift;
-    my $server = shift;
+    my $uuid = shift;
+    my $addr = shift;
     my $vos;
     my $save;
     my $errormsg = "";
 
-    my $options = "-server $server -noauth -noresolve";
+    my $options = "-server $addr -noauth -noresolve";
     if ($opt_level >= 2) {
         $options .= " -format";  # slowest, all volume headers
     }
@@ -863,7 +951,7 @@ sub vos_listvol
         $options .= " -cell $opt_cell";
     }
     if ($opt_offline) {
-        my $file = "$opt_offline/$server.listvol";
+        my $file = "$opt_offline/$addr.listvol";
         if ($options =~ /\-fast/) {
             $file .= ".fast";
         }
@@ -877,7 +965,7 @@ sub vos_listvol
         open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
         if ($opt_save) {
-            my $file = "$opt_save/$server.listvol";
+            my $file = "$opt_save/$addr.listvol";
             if ($options =~ /\-fast/) {
                 $file .= ".fast";
             }
@@ -909,9 +997,9 @@ sub vos_listvol
         if ($options =~ /\-fast/) {
             if (/^(\d+)\s*$/) {
                 if ($1 == 0) {
-                    error("vol: volume id is zero: $server:$part");
+                    error("vol: volume id is zero: $addr:$part");
                 } else {
-                    my $v = {serv=>$server, part=>$part, id=>$1};
+                    my $v = {serv=>$uuid, part=>$part, id=>$1};
                     push(@{ $vol->{list} }, $v);
                 }
             }
@@ -921,7 +1009,7 @@ sub vos_listvol
         if ($state == 0) {
             if (/^BEGIN_OF_ENTRY/) {
                 $state = 1;
-                $v = {};
+                $v = {serv=>$uuid};
                 next;
             }
         }
@@ -955,9 +1043,9 @@ sub vos_listvol
                 $state = 0;
                 next;
             }
-            if (/^(name|id|type|serv|status)\s+(\S+)/) {
+            if (/^(name|id|type|status)\s+(\S+)/) {
                 if ($1 eq "id" && $2 == 0) {
-                    error("vol: volume id is zero on server $server");
+                    error("vol: volume id is zero on server $addr");
                     next;
                 }
                 $v->{$1} = $2;
@@ -968,7 +1056,7 @@ sub vos_listvol
             }
             next;
         }
-        die "FATAL: vol: error reading listvol for server $server: $_";
+        die "FATAL: vol: error reading listvol for server $addr: $_";
     }
     close($vos);
     unless ($? == 0) {
@@ -991,8 +1079,9 @@ sub cell_vos_listvol
     unless ($opt_level >= 1) {
         return undef;
     }
-    foreach my $server (@{ $servers }) {
-        vos_listvol($vol, $server);
+    foreach my $uuid (@{ $servers->{active} }) {
+        my $addr = $servers->{u2a}->{$uuid}->[0];
+        vos_listvol($vol, $uuid, $addr);
     }
     return $vol;
 }
@@ -1019,17 +1108,18 @@ sub tx_lookup
 sub vos_status
 {
     my $tx = shift;
-    my $server = shift;
+    my $uuid = shift;
+    my $addr = shift;
     my $vos;
     my $save;
     my $errormsg = "";
 
-    my $options = "-server $server -noauth -noresolve";
+    my $options = "-server $addr -noauth -noresolve";
     if ($opt_cell) {
         $options .= " -cell $opt_cell";
     }
     if ($opt_offline) {
-        my $file = "$opt_offline/$server.status";
+        my $file = "$opt_offline/$addr.status";
         info("reading: $file");
         open($vos, "<", $file) or die "FATAL: Failed to open offline file $file: $!";
         $errormsg = "failed closing $file";
@@ -1040,7 +1130,7 @@ sub vos_status
         open($vos, "$cmd |") or die "FATAL: Failed to run $cmd: $!";
         $errormsg = "failed running: $cmd";
         if ($opt_save) {
-            my $file = "$opt_save/$server.status";
+            my $file = "$opt_save/$addr.status";
             info("saving to file $file");
             open($save, ">", $file) or die "FATAL: Failed to open $file: $!";
         }
@@ -1057,7 +1147,7 @@ sub vos_status
                 $total = $1;
             }
             if (/^------/) {
-                $t = {server=>$server};
+                $t = {addr=>$addr, uuid=>$uuid};
                 $state = 1;
             }
             next;
@@ -1118,14 +1208,15 @@ sub cell_vos_status
 {
     my $servers = shift;
     my $tx = {list => []};
-    foreach my $server (@{ $servers }) {
-        vos_status($tx, $server);
+    foreach my $uuid (@{ $servers->{active} }) {
+        my $addr = $servers->{u2a}->{$uuid}->[0];
+        vos_status($tx, $uuid, $addr);
     }
     return $tx;
 }
 
 #------------------------------------------------------------------
-# Format a human readable string for the site.
+# Format a human readable string for the volume site.
 #
 sub site_string
 {
@@ -1139,14 +1230,32 @@ sub site_string
 }
 
 #------------------------------------------------------------------
-# Format the site location string.
+# Format the server/partition string.
 #
-sub site_location
+sub location
 {
     my $site = shift;
-    return sprintf("at %s:%s",
-        $site->{serv} ? $site->{serv} : "<unknown>",
+    my $addr = site_get_addr($site);
+    return sprintf("%s:%s",
+        $addr ? $addr : "<unknown>",
         $site->{part} ? $site->{part} : "?");
+}
+
+#------------------------------------------------------------------
+# Lookup the volume site address from the uuid. Return the first
+# address given by listaddrs for the uuid.
+#
+# Note: The U2A table is created from the output of vos listaddrs
+#       and put into a global table for lookups.
+#
+sub site_get_addr
+{
+    my $site = shift;
+    my $addr;
+    if ($site->{serv} && $U2A->{$site->{serv}}) {
+        $addr = $U2A->{$site->{serv}}->[0];
+    }
+    return $addr;
 }
 
 #------------------------------------------------------------------
@@ -1156,7 +1265,7 @@ sub site_key
 {
     my $site = shift;
     if ($site->{flag} && $site->{flag} == REL_NOT) {
-       info("skipping unreleased site: ". site_string($site) ." ". site_location($site));
+       info("skipping unreleased site: ". site_string($site) ." at ". location($site));
        return undef;
     }
     assert(exists($site->{serv}), "site is missing 'serv': ". site_string($site));
