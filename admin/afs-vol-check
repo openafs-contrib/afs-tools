@@ -161,7 +161,7 @@ use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
 
-our $VERSION = "1.09";
+our $VERSION = "1.10";
 our $VOS; # /<path>/vos
 our $U2A; # uuid to address table
 
@@ -232,6 +232,7 @@ sub main
     my $vols = cell_vos_listvol($vldb->{servers});
 
     $U2A = $vldb->{servers}->{u2a}; # for printing addresses instead of uuids
+    check_for_old_servers($vldb->{servers});
     check_for_missing_volumes($vldb, $vols);
     check_for_stray_volumes($vldb, $vols);
     check_for_broken_volume_names($vldb, $vols);
@@ -258,6 +259,20 @@ sub is_dir_empty
     }
     closedir($dir);
     return 1;
+}
+
+#------------------------------------------------------------------
+sub check_for_old_servers
+{
+    my $servers = shift;
+    my %active = map { $_ => 1 } @{ $servers->{active} };
+
+    foreach my $uuid (keys(%{ $servers->{u2a} })) {
+        unless ($active{$uuid}) {
+            check_failed("old file server in vldb: $uuid (".
+                join(", ", @{ $servers->{u2a}->{$uuid} }) .")");
+        }
+    }
 }
 
 #------------------------------------------------------------------
@@ -694,7 +709,7 @@ sub vos_listaddrs
     my $u2a = {}; # uuid to list of addresses
     my $a2u = {}; # address to uuid
 
-    my $options = "-noauth -noresolve --printuuid";
+    my $options = "-noauth -noresolve -printuuid";
     if ($opt_cell) {
         $options .= " -cell $opt_cell";
     }
