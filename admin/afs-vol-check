@@ -237,9 +237,8 @@ sub main
     check_for_stray_volumes($vldb, $vols);
     check_for_broken_volume_names($vldb, $vols);
     check_for_missing_ro_clone_site($vldb);
-    check_for_stale_locks($vldb, $tx);
     check_for_offline_volumes($vldb, $vols);
-    check_for_failed_releases($vldb);
+    check_for_stale_locks_and_failed_releases($vldb, $tx);
 
     return 0; # all checks ran
 }
@@ -395,7 +394,7 @@ sub check_for_broken_volume_names
 }
 
 #------------------------------------------------------------------
-sub check_for_stale_locks
+sub check_for_stale_locks_and_failed_releases
 {
     my $vldb = shift;
     my $tx = shift;
@@ -410,21 +409,8 @@ sub check_for_stale_locks
             }
         }
         $v->{stalelock} = 1;
-        if ($v->{op}) {
-            check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
-        }
-        else {
-            check_failed("possible stale lock: $v->{name} ($v->{rw})");
-        }
     }
-}
 
-#------------------------------------------------------------------
-sub check_for_failed_releases
-{
-    my $vldb = shift;
-
-    # check_for_stale_locks() must be run before this routine is called.
     info("checking for failed releases ...");
     while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
         if ($v->{rflags}) {  # one or more vldb release flags were seen
@@ -437,6 +423,15 @@ sub check_for_failed_releases
             }
             else {
                 check_failed("failed release: $v->{name} ($v->{rw})");
+                $v->{stalelock} = 0;
+            }
+            if ($v->{stalelock}) {
+                if ($v->{op}) {
+                    check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
+                }
+                else {
+                    check_failed("possible stale lock: $v->{name} ($v->{rw})");
+                }
             }
         }
     }
