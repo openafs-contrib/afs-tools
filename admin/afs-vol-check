@@ -425,13 +425,13 @@ sub check_for_stale_locks_and_failed_releases
                 check_failed("failed release: $v->{name} ($v->{rw})");
                 $v->{stalelock} = 0;
             }
-            if ($v->{stalelock}) {
-                if ($v->{op}) {
-                    check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
-                }
-                else {
-                    check_failed("possible stale lock: $v->{name} ($v->{rw})");
-                }
+        }
+        if ($v->{stalelock}) {
+            if ($v->{op}) {
+                check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
+            }
+            else {
+                check_failed("possible stale lock: $v->{name} ($v->{rw})");
             }
         }
     }
