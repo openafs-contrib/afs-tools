@@ -161,7 +161,7 @@ use Getopt::Long;
 use Pod::Usage;
 use Time::Local;
 
-our $VERSION = "1.10";
+our $VERSION = "1.11";
 our $VOS; # /<path>/vos
 our $U2A; # uuid to address table
 
