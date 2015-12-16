@@ -118,7 +118,7 @@ if (defined $input) {
 }
 
 sub usage {
-    print STDERR "usage: volnamei <volume-id> [<volume-id> ...]\n";
+    print STDERR "usage: volnamei <rw-volume-id> [<rw-volume-id> ...]\n";
     print STDERR "       volnamei <namei-path> [<namei-path> ...]\n";
     print STDERR "       volnamei -f <input>\n";
     exit(1);
