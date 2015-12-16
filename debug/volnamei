@@ -20,7 +20,7 @@ volnamei - convert volume numbers to AFS fileserver namei paths
 
 =head1 SYNOPSIS
 
-B<volnamei> I<volume-id> [I<volume-id> ...] [--partid|-p I<partid>]
+B<volnamei> I<rw-volume-id> [I<rw-volume-id> ...] [--partid|-p I<partid>]
 
 B<volnamei> I<namei-path> [I<namei-path> ...]
 
@@ -28,9 +28,9 @@ B<volnamei> B<--file|-f> I<file> [--partid|-p I<partid>]
 
 =head1 DESCRIPTION
 
-B<volnamei> is a debugging aid to convert AFS volume numbers to fileserver
-namei paths (e.g. F</vicepa/AFSIDat/*/*>) or to convert namei paths to
-volume numbers.  B<volnamei> does not affect AFS fileservers.
+B<volnamei> is a debugging aid to convert AFS read-write volume numbers to
+fileserver namei paths (e.g. F</vicepa/AFSIDat/*/*>) and to convert namei paths
+to read-write volume numbers.  B<volnamei> does not affect AFS fileservers.
 
 Multiple volume numbers or namei paths may be given at a time.
 
@@ -38,9 +38,9 @@ Multiple volume numbers or namei paths may be given at a time.
 
 =over 8
 
-=item I<volume-id>
+=item I<rw-volume-id>
 
-A numeric volume id.
+A numeric read-write volume id.
 
 =item I<namei-path>
 
@@ -62,25 +62,17 @@ wildcard C<*>.
 
 =head1 EXAMPLES
 
-Find the namei paths for two volumes:
+Find the namei paths for two volume groups, using the read-write
+volume ids:
 
     $ volnamei 536870925 536870913
     536870925:    /vicep*/AFSIDat/B/B+++U
     536870913:    /vicep*/AFSIDat/=/=+++U
 
-Find the volume number for a namei path:
+Find the volume group number for a namei path:
 
     $ volnamei /vicepa/AFSIDat/C/C+++U
     536870926:    /vicep*/AFSIDat/C/C+++U
-
-Find all the namei paths for the volumes on C<fs1>
-parition a, using grep to filter out the volume numbers from
-vos listvol:
-
-    $ vos listvol fs1 a -fast | grep '^[0-9]' | volnamei -p a -f -
-    536870925:    /vicepa/AFSIDat/B/B+++U
-    536870912:    /vicepa/AFSIDat/+/++++U
-    ...
 
 =head1 COPYRIGHT
 
