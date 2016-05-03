@@ -30,7 +30,7 @@ VOS=/usr/sbin/vos
 DUMPSCAN=/usr/local/bin/afsdump_scan
 
 # Site specific configuration options.
-if -f /etc/afs-dumpster.conf; then
+if [ -f /etc/afs-dumpster.conf ]; then
     . /etc/afs-dumpster.conf
 fi
 
