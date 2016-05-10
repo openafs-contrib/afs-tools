@@ -154,6 +154,7 @@ use constant {
     LEPP         => 6,      # base-2 logarithm of EPP
     DHE          => 12,     # number of records taken up in page 0 by the directory header
     NAMESIZE     => 20,     # number of octets for a name in a non-continuation record
+    MAX_FN_LEN   => 256,    # common max filename length
 };
 
 my $opt_dump = 0;
@@ -230,6 +231,7 @@ sub size_range
         $a = $b + 1;
         $b = $a + RECSIZE - 1;
     }
+    $b = MAX_FN_LEN if $b > MAX_FN_LEN;
     return ($a, $b);
 }
 
@@ -477,6 +479,7 @@ sub main
             my ($from, $to) = size_range($size_class);
             printf("\t\t%d..%d: %d\n", $from, $to, $free);
             $size_class++;
+            last if $to >= MAX_FN_LEN;
         }
         printf("\t}\n");
         printf("}\n");
