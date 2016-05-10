@@ -158,11 +158,13 @@ use constant {
 };
 
 my $opt_dump = 0;
+my $opt_dumpfree = 0;
 my $opt_list = 0;
 my $opt_stats = 0;
 
 GetOptions(
     "dump" => \$opt_dump,
+    "dumpfree" => \$opt_dumpfree,
     "list" => \$opt_list,
     "stats" => \$opt_stats,
 ) or die("usage: dirobj [--dump] [--list] [--stats] [file]\n");
@@ -379,7 +381,16 @@ sub scan_dirobj
                     die "failed to read page $page record $record: $!";
                 }
                 if (!$allocated[$record]) {
-                    next; # Entry is not in use; don't show garbage.
+                    if ($opt_dumpfree) {
+                        my ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
+                        my (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
+                        my $ascii = $name;
+                        $ascii =~ s/[^[:print:]]/./g;
+                        printf("index %u, page %u, record %u, free {\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
+                            "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tascii: %s\n\thex:%s\n}\n",
+                             $index, $page, $record, $flags, $reserved, $next, $vnode, $uniq, $ascii, $hex);
+                    }
+                    next; # Entry is not in use.
                 }
                 if (!$continuation) {
                     # Regular record.
@@ -387,11 +398,14 @@ sub scan_dirobj
                     my (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
 
                     $hex =~ s/(..)/ $1/g;
+                    my $ascii = $name;
                     $name =~ s/\0.*$//;
+                    $name =~ s/[^[:print:]]/./g;
+                    $ascii =~ s/[^[:print:]]/./g;
                     if ($opt_dump) {
                         printf("index %u, page %u, record %u, entry {\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
-                            "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: \"%s\"\n\thex:%s\n}\n",
-                             $index, $page, $record, $flags, $reserved, $next, $vnode, $uniq, $name, $hex);
+                            "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: %s\n\tascii: %s\n\thex:%s\n}\n",
+                             $index, $page, $record, $flags, $reserved, $next, $vnode, $uniq, $name, $ascii, $hex);
                     }
                     if (defined($dirent)) {
                         die "!";
@@ -404,10 +418,13 @@ sub scan_dirobj
                     my ($hex) = unpack('H64', $buf);
 
                     $hex =~ s/(..)/ $1/g;
+                    my $ascii = $name;
                     $name =~ s/\0.*$//;
+                    $name =~ s/[^[:print:]]/./g;
+                    $ascii =~ s/[^[:print:]]/./g;
                     if ($opt_dump) {
-                        printf("index %u, page %u, record %u, continuation {\n\tname: \"%s\"\n\thex:%s\n}\n",
-                               $index, $page, $record, $name, $hex);
+                        printf("index %u, page %u, record %u, continuation {\n\tname: %s\n\t\n\tascii: %s\n\thex:%s\n}\n",
+                               $index, $page, $record, $name, $ascii, $hex);
                     }
                     if (!defined($dirent)) {
                         die "!";
