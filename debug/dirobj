@@ -20,18 +20,20 @@ dirobj - decode an AFS3 directory object
 
 =head1 SYNOPSIS
 
-B<dirobj> [--dump] [--list] [--stats] [I<file>]
+B<dirobj> dump [I<filename>]
+
+B<dirobj> list [I<filename>]
+
+B<dirobj> stats [I<filename>]
 
 =head1 DESCRIPTION
 
-B<dirobj> is a debugging aid for analyzing AFS3 directory objects.
+B<dirobj> decodes AFS3 directory objects for debugging and troubleshooting.
 
-An AFS3 directory object contains the list of directory entry names and
-corresponding AFS3 file identifiers (FID) of each directory entry of a
-filesystem directory.  AFS3 clients perform path lookups by fetching the entire
-directory object from the server and performing lookups of the FIDs by
-directory entry name. See L</SEE ALSO> for complete description of the
-directory object encoding.
+An AFS3 directory object contains a list of tuples of directory entry names and
+corresponding AFS3 file vnode and unique identifiers.  AFS3 clients perform
+path lookups by fetching the entire directory object from the server and
+performing lookups of the AFS3 file identifier (FID) by directory entry name.
 
 The same encoding of directory objects is used to represent directories on the
 wire, on OpenAFS file server partitions, within the OpenAFS cache manager file
@@ -41,37 +43,45 @@ AFS3 directory objects suffer from limits imposed by the encoding and
 inefficiencies due to data fragmentation. This tool may be useful in
 determining how many more directory entries may be added to a directory.
 
+For a complete description of the AFS3 directory object format, see
+http://www.ietf.org/archive/id/draft-keiser-afs3-directory-object-00.txt
+
 =head1 OPTIONS
 
 =over 8
 
-=item B<--dump>
+=item B<dump>
 
-Dump the contents of the directory object in a human readable text
-format.
+Dump the contents of the directory object in a human readable text format for
+debugging purposes.
 
-=item B<--list>
+=item B<list>
 
-List the directory entries found. Lists the vnodes, uniquifiers, and
-the directory entry names.
+List the directory entries. Lists the vnodes, uniquifiers, and the directory
+entry names for each entry in the directory object.
 
-=item I<file>
+=item B<stats>
 
-A file containing an AFS3 directory object.  B<dirobj> will read from
-the C<stdin> stream when I<file> is not given.
+Analyze the directory object to report used and available space.
+
+=item I<filename>
+
+Filename of an AFS3 directory object. This can be obtained from the client
+cache or the file server vice partition.  B<dirobj> will read from the C<stdin>
+stream when B<filename> is not given.
 
 =back
 
 =head1 EXAMPLES
 
 Directory objects can be extracted from the fileserver partitions (with root
-access to the fileserver), or from the cache managers file-based cached (with
+access to the fileserver) or from the cache managers file-based cached (with
 AFS access to the directory and root access to the local file system.)
 
-Note: It is possible to extract directory objects from volume dumps, but I do
-not know of a convenient way to do this.  The CMU afsdump-scan tool will print
-directory listings and extract files from dumps, and could be modified to
-extract directory objects.
+It is possible to extract directory objects from volume dumps, but I do not
+know of a convenient way to do this at this time.  The CMU afsdump-scan tool
+will print directory listings and extract files from dumps, but does not
+currently extract directory object as binary blobs.
 
 =head2 Server directory objects
 
@@ -90,7 +100,7 @@ For example, To find the directory corresponding to the FID C<536870921.3.207>,
 
 The directory object can be decoded with B<dirobj>,
 
-    # /usr/local/bin/dirobj /vicepa/AFSIDat/7/7+++U/+/+/1++++wA
+    # /usr/local/bin/dirobj dump /vicepa/AFSIDat/7/7+++U/+/+/1++++wA
     ...
 
 =head2 Client directory objects
@@ -124,7 +134,7 @@ to the file which contains the directory object.
 
 Finally, B<dirobj> may be used to examine the directory object.
 
-    $ sudo /usr/local/bin/dirobj /usr/vice/cache/D100/V206396
+    $ sudo /usr/local/bin/dirobj dump /usr/vice/cache/D100/V206396
     ...
 
 =head1 SEE ALSO
@@ -140,309 +150,391 @@ Copyright (c) 2012-2016, Sine Nomine Associates
 
 use strict;
 use warnings;
-use Getopt::Long;
 
 use constant {
     MAGIC        => 1234,   # header magic number
-    AFS_PAGESIZE => 2048,   # the size of each page in an AFS-3 directory object (in octets)
-    MAXPAGES     => 128,    # the maximum number of pages in a legacy directory object
-    BIGMAXPAGES  => 1023,   # the maximum number of pages in a new (circa 1988) directory object
+    PAGESIZE     => 2048,   # the size of each page in an AFS-3 directory object (in octets)
+    OLDMAXPAGES  => 128,    # the maximum number of pages in a legacy directory object
+    MAXPAGES     => 1023,   # the maximum number of pages in a directory object
     NHASHENT     => 128,    # number of hash buckets in the entry name hash table
     RECSIZE      => 32,     # number of octets in a record
-    LRECSIZE     => 5,      # base-2 logarithm of RECSIZE
     EPP          => 64,     # number of records per page
-    LEPP         => 6,      # base-2 logarithm of EPP
     DHE          => 12,     # number of records taken up in page 0 by the directory header
-    NAMESIZE     => 20,     # number of octets for a name in a non-continuation record
-    MAX_FN_LEN   => 256,    # common max filename length
+    OLDNAMESIZE  => 16,     # number of octets for a name in a legacy dirent record
+    MAXNAMELEN   => 256,    # maximum directory entry name length supported (excluding the nul)
 };
 
-my $opt_dump = 0;
-my $opt_dumpfree = 0;
-my $opt_list = 0;
-my $opt_stats = 0;
-
-GetOptions(
-    "dump" => \$opt_dump,
-    "dumpfree" => \$opt_dumpfree,
-    "list" => \$opt_list,
-    "stats" => \$opt_stats,
-) or die("usage: dirobj [--dump] [--list] [--stats] [file]\n");
-my $file = shift;
-
-# For --list.
-my @DirEnts = ();
-
-# For free space and fragmentation analysis.
-my $Entries = 0;
-my $PagesUsed = 0;
-my $RecordsUsed = 0;
-my $FreeRecords = 0;
-my $LargestFreeBlock = 0;
-my @FreeBySizeClass = (0) x (EPP-1);
-my @FragPerPage = ();
-
 #
-# Find min value in list of ints.
+# Find the number of records needed to store a name.
 #
-sub min
+# This is the same algorithm used by clients to list directory entries and
+# servers when adding new entries.  See afs_dir_NameBlobs() in OpenAFS
+# src/dir/dir.c.
+#
+# Note: Unfortunately, this calculation allocates more extension records than
+# are actually needed for certain name lengths.  For example, a name of 16 to
+# 19 bytes long should fit into one record, but in practice an extra and unused
+# extension record is allocated.
+#
+sub name_to_records
 {
-    my $x = shift;
-    foreach (@_) {
-        $x = $_ if $_ < $x;
-    }
-    return $x;
+    my $name = shift;  # nul terminated
+    my $nbytes = length($name) + 1;
+    return (1 + int(($nbytes + (OLDNAMESIZE - 1)) / RECSIZE));
 }
 
 #
-# Find max value in list of ints.
+# Find the range of lengths which can be stored in the given number of records.
 #
-sub max
+# This is the inverse of name_to_records. It returns the range of name sizes
+# which can be stored in the given number of records.
+#
+sub records_to_names
 {
-    my $x = shift;
-    foreach (@_) {
-        $x = $_ if $_ > $x;
-    }
-    return $x;
-}
-
-#
-# Find the average value in list of ints.
-#
-sub average
-{
-    return 0 if scalar(@_) == 0;
-    my $x = 0;
-    foreach (@_) {
-        $x += $_;
-    }
-    return $x / scalar(@_);
-}
-
-#
-# Find the name sizes for a given "size class".
-# The nul char is not included in the sizes returned,
-# i.e. the sizes are for the names seen by the user.
-#
-sub size_range
-{
-    my $size_class = shift;
-    die "Internal error: invalid size class" if $size_class < 1;
-    my ($a, $b) = (1, (NAMESIZE - 1));
-    for (my $i = ($size_class - 1); $i != 0; $i--) {
-        $a = $b + 1;
-        $b = $a + RECSIZE - 1;
-    }
-    $b = MAX_FN_LEN if $b > MAX_FN_LEN;
-    return ($a, $b);
+    my $records = shift;
+    my $min = (RECSIZE * $records) - (RECSIZE + OLDNAMESIZE);
+    my $max = (RECSIZE * ($records + 1)) - (RECSIZE + OLDNAMESIZE) - 1;
+    $min = 1 if $min < 1;
+    $max = MAXNAMELEN if $max > (MAXNAMELEN);
+    return ($min, $max);
 }
 
 #
 # Calculate the percent fragmentation.
 #
-sub percent_fragmentation
+sub percent_frag
 {
     my $free = shift;
-    my $largest_block = shift;
+    my $largest = shift;
     my $pf = 0;
     if ($free > 0) {
-        $pf = 1.0 - ($largest_block / $free);
+        $pf = 1.0 - ($largest / $free);
     }
     return int($pf * 100.0);
 }
 
-#
-# Free space analysis of a page.
-#
-# Since continuation records may not span pages, we can analyze
-# individual pages for free space.
-#
-sub find_free_space
-{
-    my $bitmap = shift; # string of 1 and 0s
-    my $size_class;
-    my $page_free = 0;
-    my $page_largest = 0;
-    my @slots = ();
 
-    foreach $size_class (1 .. length($bitmap)) {
-        my $block = "0" x $size_class;
-        my @free_blocks = ($bitmap =~ /$block/g);
-        my $available = scalar(@free_blocks);
-        last if $available == 0;
-        push(@slots, $available);
-        if ($size_class == 1) {
-            $page_free = $available;
+#
+# Helper to dump dirheader entries.
+#
+sub dump_entries
+{
+    my $name = shift;
+    my $nil = shift;
+    my $i = 0;
+
+    printf("\t%s: {\n", $name);
+    foreach my $x (@_) {
+        # Skip empty entries to trim output.
+        if ($x != $nil) {
+            printf("\t\t%d: %d\n", $i, $x);
         }
-        $page_largest = $size_class;
+        $i++;
     }
-    return ($page_free, $page_largest, \@slots);
+    printf("\t}\n");
 }
 
 #
-# Scan the directory object.
+# Dump the directory to a human readable format for debugging.
 #
-sub scan_dirobj
+# It would probably be better to format the output as yaml or or some
+# such format, but this is just used for debugging for now.
+#
+sub dirobj_dump
 {
     my $fh = shift;
-    my $page;
-    my $record;
-    my $index = 0;
-    my $reading = 1;
-    my @allocated = ();
-    my $continuation = 0;
-    my $buf;
-    my $dirent;
+    my $page = 0;
 
-    PAGE: for ($page = 0; $reading && $page < BIGMAXPAGES; $page++) {
-        RECORD: for ($record = 0; $record < EPP; $record++, $index++, $RecordsUsed++) {
-            if ($record == 0) {
-                # First record of each page is a page header.
-                if ($continuation) {
-                    warn("Missing name termination! page $page record $record.");
-                    $continuation = 0;
-                    $dirent = undef;
-                }
-                my $n = read($fh, $buf, RECSIZE);
-                if ($n == 0) {
-                    $reading = 0;
-                    last PAGE; # Done.
-                }
-                if ($n != RECSIZE) {
-                    die "failed to read page $page record $record: $!";
-                }
-                my ($pgcount, $tag, $r1, $bitmap, $r2) = unpack('nnCb64C19', $buf);
-                if ($tag != MAGIC) {
-                    die "Invalid magic number in page $page header! Found $tag, expected ". MAGIC.".\n";
-                }
-                @allocated = split(//, $bitmap);
-                if ($allocated[0] != 1) {
-                    # The page header must be allocated or something is seriously wrong.
-                    die "Bogus allocation bitmap!";
-                }
+    PAGE: for (;;) {
+        my $buffer;
+        my $record = 0;
+        my $offset = 0;
 
-                if ($opt_stats) {
-                    my $i;
-                    my ($free, $largest, $slots) = find_free_space($bitmap);
-                    $FreeRecords += $free;
-                    if ($largest > $LargestFreeBlock) {
-                        $LargestFreeBlock = $largest;
-                    }
-                    foreach my $s (@{$slots}) {
-                        $FreeBySizeClass[$i++] += $s;
-                    }
-                    push(@FragPerPage, percent_fragmentation($free, $largest));
-                }
+        my $nbytes = read($fh, $buffer, PAGESIZE);
+        last PAGE if $nbytes == 0 && $page != 0;
+        die "Failed to read page: $!" if $nbytes != PAGESIZE;
 
-                if ($opt_dump) {
-                    printf("index %u, page %u, record %u, page_header {\n\tpgcount: %u\n\ttag: %u\n\tbitmap {\n",
-                        $index, $page, $record, $pgcount, $tag);
-                    for (my $i = 0 ; $i < EPP ; $i++) {
-                        printf("\t\t%u: %u\n", $i, $allocated[$i]);
-                    }
-                    printf("\t}\n}\n");
-                }
-            } elsif ($page == 0 && $record == 1) {
-                if ($continuation) {
-                    warn("Missing name termination! page $page record $record.");
-                    $continuation = 0;
-                    $dirent = undef;
-                }
-                # Records 1 to 12 of the first page contain the directory header.
-                if (read($fh, $buf, 4 * RECSIZE) != (4 * RECSIZE)) {
-                    die "failed to directory header: $!";
-                }
-                my @pagemap = unpack('C' x MAXPAGES, $buf);
+        # First record contains the page header.
+        my ($pgcount, $tag, $r1, $bitmap, $r2) = unpack("nnCb64C19", $buffer);
+        my ($hex) = unpack("H64", $buffer);
+        $record++;
 
-                if (read($fh, $buf, 8 * RECSIZE) != (8 * RECSIZE)) {
-                    die "failed to directory header: $!";
-                }
-                my @hashchain = unpack('n' x NHASHENT, $buf);
+        die "Not a directory object." if $tag != MAGIC;
+        my @allocated = split(//, $bitmap);
 
-                if ($opt_dump) {
-                    printf("index %u, page %u, record %u, directory_header {\n\tpagemap {\n",
-                           $index, $page, $record);
-                    for (my $i = 0 ; $i < MAXPAGES ; $i++) {
-                        printf("\t\t%u: %u\n", $i, $pagemap[$i]);
-                    }
-                    printf("\t}\n\thashchain {\n", $index);
-                    for (my $i = 0 ; $i < NHASHENT ; $i++) {
-                        printf("\t\t%u: %u\n", $i, $hashchain[$i]);
-                    }
-                    printf("\t}\n}\n");
-                }
+        printf("page %u, pageheader {\n".
+               "\tpgcount: %d\n".
+               "\ttag: %d\n".
+               "\tbitmap: %s\n".
+               "\thex: %s\n}\n",
+               $page, $pgcount, $tag, $bitmap, $hex);
 
-                # Bump the counters for the extra records just read.
-                $record += 11;
-                $index  += 11;
-            } else {
-                # Directory entry records.
-                if (read($fh, $buf, RECSIZE) != RECSIZE) {
-                    die "failed to read page $page record $record: $!";
-                }
-                if (!$allocated[$record]) {
-                    if ($opt_dumpfree) {
-                        my ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
-                        my (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
-                        my $ascii = $name;
-                        $ascii =~ s/[^[:print:]]/./g;
-                        printf("index %u, page %u, record %u, free {\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
-                            "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tascii: %s\n\thex:%s\n}\n",
-                             $index, $page, $record, $flags, $reserved, $next, $vnode, $uniq, $ascii, $hex);
-                    }
-                    next; # Entry is not in use.
-                }
-                if (!$continuation) {
-                    # Regular record.
-                    my ($flags, $reserved, $next, $vnode, $uniq, $name) = unpack('CCnNNA20', $buf);
-                    my (undef, undef, undef, undef, undef, $hex) = unpack('CCnNNH40', $buf);
+        # First page contains the directory header.
+        if ($page == 0) {
+            $offset = $record * RECSIZE;
+            my @pagemap = unpack("x${offset}" . "C" . OLDMAXPAGES, $buffer);
+            my @hashchain = unpack("x". ($offset + OLDMAXPAGES) . "n" . NHASHENT, $buffer);
+            $record += DHE;
 
-                    $hex =~ s/(..)/ $1/g;
-                    my $ascii = $name;
-                    $name =~ s/\0.*$//;
-                    $name =~ s/[^[:print:]]/./g;
-                    $ascii =~ s/[^[:print:]]/./g;
-                    if ($opt_dump) {
-                        printf("index %u, page %u, record %u, entry {\n\tflags: 0x%02x\n\treserved: 0x%02x\n".
-                            "\tnext: %u\n\tvnode: %u\n\tuniq: %u\n\tname: %s\n\tascii: %s\n\thex:%s\n}\n",
-                             $index, $page, $record, $flags, $reserved, $next, $vnode, $uniq, $name, $ascii, $hex);
-                    }
-                    if (defined($dirent)) {
-                        die "!";
-                    }
-                    $dirent = {'VNODE'=>$vnode, 'UNIQ'=>$uniq, 'NAME'=>$name};
-                    $continuation = ($hex !~ /00/); # Is the next record a continuation?
+            printf("page %u, dirheader {\n", $page);
+            dump_entries("pagemap", 64, @pagemap);
+            dump_entries("hashchain", 0, @hashchain);
+            printf("}\n");
+        }
+
+        # Decode the records. Determine which ones are extents, and format those
+        # differently.
+        while ($record < EPP) {
+            $offset = $record * RECSIZE;
+            my ($flags, $r, $next, $vnode, $uniq, $name) = unpack("x${offset}CCnNNZ20", $buffer);
+            my ($hex) = unpack("x${offset}H64", $buffer);
+            my ($text) = unpack("x${offset}a32", $buffer);
+
+            my $nconts = 0;
+            if ($allocated[$record]) {
+                my ($extname) = unpack("x${offset}x12Z256", $buffer);
+                $nconts = name_to_records($extname) - 1;
+            }
+
+            my $garbage;
+            if ($allocated[$record]) {
+                ($garbage) = unpack("x${offset}x12a20", $buffer);
+                if ($garbage =~ /\0/) {
+                    $garbage =~ s/^.*?\0//;  # trim before the nul
                 } else {
-                    # Continuation record.
-                    my ($name) = unpack('A32', $buf);
-                    my ($hex) = unpack('H64', $buf);
+                    $garbage = "";
+                }
+            } else {
+                $garbage = $text;
+            }
 
-                    $hex =~ s/(..)/ $1/g;
-                    my $ascii = $name;
-                    $name =~ s/\0.*$//;
-                    $name =~ s/[^[:print:]]/./g;
-                    $ascii =~ s/[^[:print:]]/./g;
-                    if ($opt_dump) {
-                        printf("index %u, page %u, record %u, continuation {\n\tname: %s\n\t\n\tascii: %s\n\thex:%s\n}\n",
-                               $index, $page, $record, $name, $ascii, $hex);
+            # Show unprintables as dots.
+            $name =~ s/[^[:print:]]/./g;
+            $text =~ s/[^[:print:]]/./g;
+            $garbage =~ s/[^[:print:]]/./g;
+
+            # Regular record; allocated or free.
+            printf("page %u, record %u {\n".
+                "\ttype: dirent\n".
+                "\talloc: %d\n".
+                "\ttext: %s\n".
+                "\tgarbage: %s\n".
+                "\thex: %s\n".
+                "\tfields: {\n".
+                "\t\tflags: 0x%02x\n".
+                "\t\treserved: 0x%02x\n".
+                "\t\tnext: %u\n".
+                "\t\tvnode: %u\n".
+                "\t\tuniq: %u\n".
+                "\t\tname: %s\n\t}\n}\n",
+                $page, $record, $allocated[$record],
+                $text, $garbage, $hex, $flags, $r, $next, $vnode, $uniq, $name);
+
+            $record++;
+
+            # Decode extension records, if any.
+            while ($record < EPP && $nconts > 0) {
+                $offset = $record * RECSIZE;
+                my ($name) = unpack("x${offset}Z32", $buffer);
+                my ($hex) = unpack("x${offset}H64", $buffer);
+                my ($text) = unpack("x${offset}a32", $buffer);
+
+                if ($allocated[$record]) {
+                    $garbage = $text;
+                    if ($garbage =~ /\0/) {
+                        $garbage =~ s/^.*?\0//;  # trim before the nul
+                    } else {
+                        $garbage = "";
                     }
-                    if (!defined($dirent)) {
-                        die "!";
-                    }
-                    $dirent->{'NAME'} .= $name;
-                    $continuation = ($hex !~ /00/); # Is the next record a continuation?
+                } else {
+                    $garbage = $text;
                 }
-                if (!$continuation) {
-                    $Entries++;
-                    if ($opt_list) {
-                        push(@DirEnts, $dirent);
-                    }
-                    $dirent = undef;
-                }
+
+                $name =~ s/[^[:print:]]/./g;
+                $text =~ s/[^[:print:]]/./g;
+                $garbage =~ s/[^[:print:]]/./g;
+                printf("page %u, record %u {\n".
+                    "\ttype: cont\n".
+                    "\talloc: %d\n".
+                    "\ttext: %s\n".
+                    "\tgarbage: %s\n".
+                    "\thex: %s\n".
+                    "\tfields: {\n".
+                    "\t\textent: %s\n\t}\n}\n",
+                    $page, $record, $allocated[$record],
+                    $text, $garbage, $hex, $name);
+
+                $nconts--;
+                $record++;
             }
         }
+        $page++;
+        die "Exceeded max pages! $page pages found" if $page > MAXPAGES;
     }
-    $PagesUsed = $page;
+}
+
+#
+# List the directory entries.
+#
+sub dirobj_list
+{
+    my $fh = shift;
+    my $page = 0;
+
+    PAGE: for (;;) {
+        my $buffer;
+        my $record = 0;
+
+        my $nbytes = read($fh, $buffer, PAGESIZE);
+        last PAGE if $nbytes == 0 && $page != 0;
+        die "Failed to read page: $!" if $nbytes != PAGESIZE;
+
+        my ($pgcount, $tag, $r1, $bitmap, $r2) = unpack("nnCb64C19", $buffer);
+        $record++;
+
+        die "Not a directory object." if $tag != MAGIC;
+        my @allocated = split(//, $bitmap);
+
+        # Skip the directory header.
+        if ($page == 0) {
+            $record += DHE;
+        }
+
+        RECORD: while ($record < EPP) {
+            if ($allocated[$record]) {
+                my $offset = $record * RECSIZE;
+                my ($flags, $r, $next, $vnode, $uniq, $name) = unpack("x${offset}CCnNNZ256", $buffer);
+                print "$vnode.$uniq $name\n";
+                $record += name_to_records($name);
+            } else {
+                $record++;
+            }
+        }
+        $page++;
+        die "Exceeded max pages! $page pages found" if $page > MAXPAGES;
+    }
+}
+
+#
+# Find the directory used and available space.
+#
+sub dirobj_stats
+{
+    my $fh = shift;
+    my $page = 0;
+    my $entries = 0;
+    my $used = 0;
+    my $free = 0;
+    my $maxslot = name_to_records('x' x MAXNAMELEN);
+    my @bucket = ();
+
+    foreach my $i (1 .. $maxslot) {
+        $bucket[$i] = 0;  # clear counters
+    }
+
+    PAGE: for (;;) {
+        my $buffer;
+        my $record = 0;
+
+        my $nbytes = read($fh, $buffer, PAGESIZE);
+        last PAGE if $nbytes == 0 && $page != 0;
+        die "Failed to read page: $!" if $nbytes != PAGESIZE;
+
+        my ($pgcount, $tag, $r1, $bitmap, $r2) = unpack("nnCb64C19", $buffer);
+        my ($hex) = unpack("H64", $buffer);
+        $record++;
+
+        die "Not a directory object." if $tag != MAGIC;
+        my @allocated = split(//, $bitmap);
+
+        # Analyze the bitmap for free slots.
+        foreach my $i (1 .. $maxslot) {
+            my $needed = '0' x $i;
+            my @slots = ($bitmap =~ /$needed/g);  # find slots for name size
+            my $nslots = scalar(@slots);
+            $bucket[$i] += $nslots;
+        }
+
+        # Analyze the block fragmentation of this page.
+        my $free = scalar(grep(/0/, @allocated)); # number of free records
+        my @blocks = ($bitmap =~ /(0+)/g);        # blocks of free records
+        my $largest = 0;                          # size of largest free block
+        foreach my $block (@blocks) {
+             my $n = length($block);
+             if ($n > $largest) {
+                 $largest = $n;
+             }
+        }
+        my $pf = percent_frag($free, $largest);
+        if ($pf > 0) {
+            print "page $page frag $pf%\n";
+        }
+
+        # Skip the directory header.
+        if ($page == 0) {
+            $record += DHE;
+        }
+
+        RECORD: while ($record < EPP) {
+            if ($allocated[$record]) {
+                my $offset = $record * RECSIZE;
+                my ($flags, $r, $next, $vnode, $uniq, $name) = unpack("x${offset}CCnNNZ256", $buffer);
+                my ($hex) = unpack("x${offset}x12H512", $buffer);
+
+                my $span = name_to_records($name);
+                $entries++;
+                $used += $span;
+                $record += $span;
+            } else {
+                $free++;
+                $record++;
+            }
+        }
+
+        $page++;
+        die "Exceeded max pages! $page pages found" if $page > MAXPAGES;
+    }
+
+    if ($page < MAXPAGES) {
+        my $empty_pages = MAXPAGES - $page;
+        my $empty_bitmap = "1" . "0" x (EPP - 1);
+        foreach my $i (1 .. $maxslot) {
+            my $slot = '0' x $i;
+            my @slots = ($empty_bitmap =~ /$slot/g);
+            $bucket[$i] += scalar(@slots) * $empty_pages;
+        }
+    }
+
+    printf("entries: %6d\n".
+           "pages:\n".
+           "\tused:  %6d\n".
+           "\tavail: %6d\n".
+           "records:\n".
+           "\ttotal: %6d\n".
+           "\tused:  %6d\n".
+           "\tfree:  %6d\n",
+           $entries,
+           $page, MAXPAGES - $page,
+           $used + $free, $used, $free);
+    printf("available slots:\n");
+    foreach my $i (1 .. $maxslot) {
+        my ($a, $b) = records_to_names($i);
+        printf("\t%3d - %3d: %6d\n", $a, $b, $bucket[$i]);
+    }
+}
+
+#
+# Print the command usage.
+#
+sub usage
+{
+    my $exit = shift;
+    print "usage: dirobj dump [<filename>]\n";
+    print "       dirobj list [<filename>]\n";
+    print "       dirobj stat [<filename>]\n";
+    print "\n";
+    print "dirobj reads from stdin when <filename> is not given.\n";
+    exit(1) if $exit;
 }
 
 #
@@ -450,58 +542,33 @@ sub scan_dirobj
 #
 sub main
 {
-    my $fh;
-    if (defined($file)) {
-        open($fh, "<", $file) or die("Cannot open $file: $!");
+    my ($action, $filename) = @_;
+    my $fh = *STDIN;
+
+    if (defined($filename) && $filename ne '-') {
+        open($fh, "<", $filename) or die("Cannot open $filename: $!");
+    }
+
+    if ($action eq 'help') {
+       usage(0);
+    } elsif ($action eq 'dump') {
+       dirobj_dump($fh);
+    } elsif ($action eq 'list') {
+       dirobj_list($fh);
+    } elsif ($action eq 'stat' || $action eq 'stats') {
+       dirobj_stats($fh);
     } else {
-        $fh = *STDIN;
-    }
-    scan_dirobj($fh);
-    close($fh);
-
-    # Show the directory entries found (if --list was given).
-    if ($opt_list) {
-        foreach my $dirent (@DirEnts) {
-            printf("%d.%d %s\n", $dirent->{'VNODE'}, $dirent->{'UNIQ'}, $dirent->{'NAME'});
-        }
+       usage(0);
     }
 
-    if ($opt_stats) {
-        my $pages_free = BIGMAXPAGES - $PagesUsed;
-        my $total_free_records = $FreeRecords + ((EPP-1) * $pages_free);
-
-        if ($pages_free > 0) {
-            my $bitmap = "1" . "0" x (EPP - 1);
-            my ($free, $largest, $slots) = find_free_space($bitmap);
-
-            $FreeRecords += ($free * $pages_free);
-            if ($largest > $LargestFreeBlock) {
-                $LargestFreeBlock = $largest;
-            }
-            my $i = 0;
-            foreach my $s (@{$slots}) {
-                $FreeBySizeClass[$i++] += ($s * $pages_free);
-            }
-        }
-        printf("stats {\n");
-        printf("\tentries: %d\n", $Entries);
-        printf("\tpages {\n\t\tused: %d\n\t\tfree: %d\n\t}\n", $PagesUsed, $pages_free);
-        printf("\trecords {\n\t\ttotal: %d\n\t\tfree: %d\n\t}\n", $RecordsUsed, $FreeRecords);
-        printf("\tfragmentation {\n\t\tmin: %d\n\t\tmax: %d\n\t\taverage: %d\n\t}\n",
-            min(@FragPerPage), max(@FragPerPage), average(@FragPerPage));
-        my $size_class = 1;
-        printf("\tavailable {\n");
-        foreach my $free (@FreeBySizeClass) {
-            last if $free == 0;
-            my ($from, $to) = size_range($size_class);
-            printf("\t\t%d..%d: %d\n", $from, $to, $free);
-            $size_class++;
-            last if $to >= MAX_FN_LEN;
-        }
-        printf("\t}\n");
-        printf("}\n");
+    if (defined($filename)) {
+        close($fh);
     }
 }
 
-main();
+# Command line options.
+my $action = shift or usage(1);
+my $filename = shift || "-";
+
+main($action, $filename);
 
