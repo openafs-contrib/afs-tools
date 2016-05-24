@@ -424,8 +424,8 @@ sub dirobj_stats
     my $fh = shift;
     my $page = 0;
     my $entries = 0;
-    my $used = 0;
-    my $free = 0;
+    my $records_used = 0;
+    my $records_free = 0;
     my $maxslot = name_to_records('x' x MAXNAMELEN);
     my @bucket = ();   # free buckets
     my @ubucket = ();  # dirent name length buckets
@@ -464,8 +464,8 @@ sub dirobj_stats
         }
 
         # Analyze the block fragmentation of this page.
-        my $free = scalar(grep(/0/, @allocated)); # number of free records
-        my @blocks = ($bitmap =~ /(0+)/g);        # blocks of free records
+        my $free = scalar(grep(/0/, @allocated)); # number of free records in this page
+        my @blocks = ($bitmap =~ /(0+)/g);        # blocks of free records in this page
         my $largest = 0;                          # size of largest free block
         foreach my $block (@blocks) {
              my $n = length($block);
@@ -490,11 +490,11 @@ sub dirobj_stats
 
                 my $span = name_to_records($name);
                 $entries++;
-                $used += $span;
+                $ubucket[$span]++;  # used bucket
+                $records_used += $span;
                 $record += $span;
-                $ubucket[$span]++;
             } else {
-                $free++;
+                $records_free++;
                 $record++;
             }
         }
@@ -513,6 +513,9 @@ sub dirobj_stats
         }
     }
 
+    my $records_total = $records_used + $records_free;
+    my $pages_used = $page;
+    my $pages_avail = MAXPAGES - $pages_used;
     printf("entries:       %6d\n".
            "pages used:    %6d\n".
            "pages avail:   %6d\n".
@@ -520,8 +523,8 @@ sub dirobj_stats
            "records used:  %6d\n".
            "records free:  %6d\n",
            $entries,
-           $page, MAXPAGES - $page,
-           $used + $free, $used, $free);
+           $pages_used, $pages_avail,
+           $records_total, $records_used, $records_free);
     printf("data fragmentation:\n".
            "\tpercent frag  pages\n".
            "\t============  =====\n");
