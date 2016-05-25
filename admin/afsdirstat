@@ -1,0 +1,74 @@
+#!/bin/sh
+#
+# Report AFS3 directory object statistics with afsio and dirobj.
+#
+# Copyright (c) 2016, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+
+PROGNAME="afsdirstat"
+DIRPATH="$1"
+
+# Command paths: Adjust as needed.
+FS="/usr/bin/fs"
+AFSIO="/usr/bin/afsio"
+DIROBJ="/usr/local/bin/dirobj"
+
+# The directory to analyze.
+if [ "x$DIRPATH" = "x" ]; then
+    echo "usage: $PROGNAME <path>" 1>&2
+    exit 1
+fi
+if [ ! -d "$DIRPATH" ]; then
+    echo "$PROGNAME: $DIRPATH is not a directory" 1>&2
+    exit 1
+fi
+
+# Verify the required programs are present and afsio has the new
+# readir subcommand.
+for PROG in $FS $AFSIO $DIROBJ
+do
+    if [ ! -f $PROG ]; then
+        echo "$PROGNAME: $PROG is missing." 1>&2
+        exit 1
+    fi
+    if [ ! -x $PROG ]; then
+        echo "$PROGNAME: $PROG is not executable." 1>&2
+        exit 1
+    fi
+done
+if $AFSIO help | grep -q '^readdir'; then
+    :
+else
+    echo "$PROGNAME: $AFSIO is missing the readdir command." 1>&2
+    exit 1
+fi
+
+# Find the cellname for this path. Needed for afsio when the
+# path resolves to a directory hosted in a foreign cell.
+WHICHCELL=`"$FS" whichcell "$DIRPATH"`
+if [ $? -ne 0 ]; then
+    echo "$PROGNAME: failed to lookup cellname." 1>&2
+    exit 1
+fi
+if echo $WHICHCELL | grep -q 'lives in cell'; then
+    CELLNAME=`echo $WHICHCELL | cut -f2 -d\'`
+else
+    echo "$PROGNAME: unexpected fs whichcell ouput: $WHICHCELL." 1>&2
+    exit 1
+fi
+
+# Retrieve the dir blob and calculate the stats.
+$AFSIO readdir -dir $DIRPATH -cell $CELLNAME | $DIROBJ stats
+
