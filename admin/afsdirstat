@@ -62,12 +62,12 @@ fi
 # The readlink -f will resolve multiple levels of symlinks to
 # find the canonical path.  Double check the canonical path
 # is a directory.
-if [ -h "$DIRPATH" ]; then
-    AFSPATH=`readlink -f "$DIRPATH"`
-    if [ $? -ne 0 ]; then
-        echo "$PROGNAME: failed to canonicalize path $DIRPATH." 1>&2
-        exit 1
-    fi
+AFSPATH=`readlink -f "$DIRPATH"`
+if [ $? -ne 0 ]; then
+    echo "$PROGNAME: failed to canonicalize path $DIRPATH." 1>&2
+    exit 1
+fi
+if [ "$AFSPATH" != "$DIRPATH" ]; then
     DIRPATH="$AFSPATH"
     if [ ! -d "$DIRPATH" ]; then
         echo "$PROGNAME: $DIRPATH is not a directory" 1>&2
