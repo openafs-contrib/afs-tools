@@ -25,16 +25,6 @@ FS="/usr/bin/fs"
 AFSIO="/usr/bin/afsio"
 DIROBJ="/usr/local/bin/dirobj"
 
-# The directory to analyze.
-if [ "x$DIRPATH" = "x" ]; then
-    echo "usage: $PROGNAME <path>" 1>&2
-    exit 1
-fi
-if [ ! -d "$DIRPATH" ]; then
-    echo "$PROGNAME: $DIRPATH is not a directory" 1>&2
-    exit 1
-fi
-
 # Verify the required programs are present and afsio has the new
 # readir subcommand.
 for PROG in $FS $AFSIO $DIROBJ
@@ -54,6 +44,37 @@ else
     echo "$PROGNAME: $AFSIO is missing the readdir command." 1>&2
     exit 1
 fi
+
+# The directory to analyze is given as the first arg.
+if [ "x$DIRPATH" = "x" ]; then
+    echo "usage: $PROGNAME <path>" 1>&2
+    exit 1
+fi
+if [ ! -e "$DIRPATH" ]; then
+    echo "$PROGNAME: $DIRPATH not found." 1>&2
+    exit 1
+fi
+if [ ! -d "$DIRPATH" ]; then
+    echo "$PROGNAME: $DIRPATH is not a directory" 1>&2
+    exit 1
+fi
+# afsio resolves paths in afs only, so resolve symlinks first.
+# The readlink -f will resolve multiple levels of symlinks to
+# find the canonical path.  Double check the canonical path
+# is a directory.
+if [ -h "$DIRPATH" ]; then
+    AFSPATH=`readlink -f "$DIRPATH"`
+    if [ $? -ne 0 ]; then
+        echo "$PROGNAME: failed to canonicalize path $DIRPATH." 1>&2
+        exit 1
+    fi
+    DIRPATH="$AFSPATH"
+    if [ ! -d "$DIRPATH" ]; then
+        echo "$PROGNAME: $DIRPATH is not a directory" 1>&2
+        exit 1
+    fi
+fi
+echo "$PROGNAME: checking directory $DIRPATH"
 
 # Find the cellname for this path. Needed for afsio when the
 # path resolves to a directory hosted in a foreign cell.
