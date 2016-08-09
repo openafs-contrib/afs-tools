@@ -41,6 +41,7 @@ Scripts for administrative tasks.
   * `dirobj`            - decode afs directory objects
   * `vixlink`           - check volinfo output for cross-device link
   * `volnamei`          - convert volume numbers to fileserver namei paths
+  * `translate_err`     - translate afs and krb5 error codes
 
 ## Monitoring
 
