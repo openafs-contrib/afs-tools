@@ -95,7 +95,7 @@ given to narrow the search to a given partition and volume.
 
 For example, To find the directory corresponding to the FID C<536870921.3.207>,
 
-    # volscan -volume 536870921 -find dir -output fid namei | grep 536870921.3.207
+    # volscan -volume 536870921 -part a -find dir -output fid namei | grep 536870921.3.207
     536870921.3.207 /vicepa/AFSIDat/7/7+++U/+/+/1++++wA
 
 The directory object can be decoded with B<dirobj>,
