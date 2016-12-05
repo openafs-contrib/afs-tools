@@ -1,0 +1,104 @@
+#!/usr/bin/perl -w
+#
+# Find volumes with dirty directory objects.
+#
+# Uses the OpenAFS volinfo and volscan tools to find all the volume directory
+# object files on the vice partitions, and then uses the afs-tools dirobj tool
+# to dectect dirty directories in those volumes.  A dirty directory object is a
+# directory which contains non-zero bytes in unused areas of the physical
+# directory object.
+#
+# The dirobj tool is available at https://github.com/openafs-contrib/afs-tools
+#
+# Must be run as root on the file server.
+#
+
+use strict;
+use Getopt::Long;
+
+# Paths to commands
+my $volscan = "/usr/afs/bin/volscan";
+my $volinfo = "/usr/afs/bin/volinfo";
+my $dirobj = "/usr/local/bin/dirobj";
+
+# Options
+my $opt_verbose = 0;
+
+#
+# Returns true if the directory object is not clean.
+#
+# namei: the path to the directory namei file
+#
+sub is_dir_dirty {
+    my ($namei) = @_;
+    my $dirty = 0;
+    open(my $pipe, "$dirobj dump $namei |") or die "Failed to run dirobj: $!";
+    while (<$pipe>) {
+        if (/^\s*garbage: (\S+)$/) {
+            $dirty = 1;
+            last;
+        }
+    }
+    close($pipe);
+    return $dirty;
+}
+
+#
+# Returns true if the volume contains at least one unclean directory.
+#
+# partid: partition id (a, b, ...)
+# vid: volume id (numeric)
+#
+sub is_vol_dirty {
+    my ($partid, $vid) = @_;
+    my $dirty = 0;
+
+
+    if ($opt_verbose) {
+        print "# scanning partition $partid volume $vid\n";
+    }
+    open(my $pipe, "$volscan -noheading -part $partid -volume $vid -find dir -output namei |") or
+        die "Failed to run volscan: $!";
+    while (<$pipe>) {
+        chomp;
+        if (is_dir_dirty($_)) {
+            $dirty = 1;
+            last;
+        }
+    }
+    close($pipe);
+    return $dirty;
+}
+
+#
+# Scan all the partitions and check for volumes with dirty directory objects.
+#
+# Read-write volumes can be cleaned by the salvager with -salvagedirs. Backup
+# and read-only volumes can be cleaned by cleaning the parent rw volume then
+# recloning/releasing.
+#
+sub find_dirty_volumes {
+    my ($partid, $vtype, $vid, $pvid);
+    my @vtypename = ('rw', 'ro', 'bk');
+
+    open(my $pipe, "$volinfo |") or die "Failed to run volinfo: $!";
+    while (<$pipe>) {
+        $partid = $1 if /^Processing Partition \/vicep(\w+):/;
+        $vid = $1 if /^Volume header for volume (\d+)/;
+        $vtype = $1 if /^type = (\d+)/;
+        $pvid = $1 if /parentId = (\d+)/;
+        if (/^volUpdateCounter/) { # end if this volume
+            if (is_vol_dirty($partid, $vid)) {
+                printf("%s %s %d %d\n", $partid, $vtypename[$vtype], $vid, $pvid);
+            }
+        }
+    }
+    close($pipe);
+}
+
+sub main {
+    GetOptions("verbose"  => \$opt_verbose) or die "usage: $0 [--verbose]\n";
+    find_dirty_volumes();
+}
+
+main();
