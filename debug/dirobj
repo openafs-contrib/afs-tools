@@ -356,7 +356,11 @@ sub dirobj_dump
 
                 $name =~ s/[^[:print:]]/./g;
                 $text =~ s/[^[:print:]]/./g;
+
+                # Dont show nuls as garbage.
+                $garbage =~ s/\0//g;
                 $garbage =~ s/[^[:print:]]/./g;
+
                 printf("page %u, record %u {\n".
                     "\ttype: cont\n".
                     "\talloc: %d\n".
