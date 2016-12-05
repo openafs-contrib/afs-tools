@@ -312,6 +312,9 @@ sub dirobj_dump
             # Show unprintables as dots.
             $name =~ s/[^[:print:]]/./g;
             $text =~ s/[^[:print:]]/./g;
+
+            # Strip nulls and show unprintables as dots.
+            $garbage =~ s/\0//g;
             $garbage =~ s/[^[:print:]]/./g;
 
             # Regular record; allocated or free.
