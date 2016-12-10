@@ -1,12 +1,16 @@
 #!/usr/bin/perl -w
 #
-# Find volumes with dirty directory objects.
+# Find volumes which contain dirty directory objects.
 #
-# Uses the OpenAFS volinfo and volscan tools to find all the volume directory
-# object files on the vice partitions, and then uses the afs-tools dirobj tool
-# to dectect dirty directories in those volumes.  A dirty directory object is a
-# directory which contains non-zero bytes in unused areas of the physical
-# directory object.
+# A dirty directory object is a directory which contains non-zero bytes in
+# unused areas of the physical directory object.  Directory pages were not
+# cleared before reuse before OpenAFS 1.6.20 which could pollute unused areas
+# of directory objects with fragments of removed file and directory names, even
+# from other volumes.
+#
+# This tool uses vos, volscan, and the afs-tools dirobj to search for volumes
+# which have dirty directory objects. Read-write volumes can be cleaned with
+# the salvager with the -salvagedirs option.
 #
 # The dirobj tool is available at https://github.com/openafs-contrib/afs-tools
 #
@@ -14,91 +18,202 @@
 #
 
 use strict;
+use File::Basename;
 use Getopt::Long;
 
-# Paths to commands
-my $volscan = "/usr/afs/bin/volscan";
-my $volinfo = "/usr/afs/bin/volinfo";
-my $dirobj = "/usr/local/bin/dirobj";
+my $MYNAME=__FILE__;
+my $OPT_VERBOSE = 0;      # Output progress messages.
+my $OPT_CHECKOUT = 0;     # Checkout the volumes as busy while scanning.
+my @OPT_VTYPES = ();  # Volume types to checks.
 
-# Options
-my $opt_verbose = 0;
+my $PATH = '/usr/sbin:/usr/bin:/usr/afs/bin:/usr/local/bin';
+my $DIRTYDIRS = __FILE__;
+my $HAVE_VOS_BUSY_EXEC = 0;
 
-#
-# Returns true if the directory object is not clean.
-#
-# namei: the path to the directory namei file
-#
-sub is_dir_dirty {
+sub which {
+    my $name = shift;
+    my ($cmd) = grep { -x $_ } map { "$_/$name" } split(/:/, $PATH);
+    unless ($cmd) {
+        die "Cannot find $name executable.";
+    }
+    return $cmd;
+}
+my $VOS = which('vos');
+my $VOLINFO = which('volinfo');
+my $VOLSCAN = which('volscan');
+my $DIROBJ = which('dirobj');
+
+
+sub scan_directory {
     my ($namei) = @_;
-    my $dirty = 0;
-    open(my $pipe, "$dirobj dump $namei |") or die "Failed to run dirobj: $!";
+    my $ndirty = 0;
+
+    if ($OPT_VERBOSE > 1) {
+        print "scanning dir $namei\n";
+    }
+    open(my $pipe, "$DIROBJ dump $namei |") or die "Failed to run dirobj: $!";
     while (<$pipe>) {
         if (/^\s*garbage: (\S+)$/) {
-            $dirty = 1;
-            last;
+            print if $OPT_VERBOSE > 2;
+            $ndirty += length($1);
         }
     }
     close($pipe);
-    return $dirty;
+    return $ndirty;
 }
 
-#
-# Returns true if the volume contains at least one unclean directory.
-#
-# partid: partition id (a, b, ...)
-# vid: volume id (numeric)
-#
-sub is_vol_dirty {
-    my ($partid, $vid) = @_;
-    my $dirty = 0;
+sub scan_volume {
+    my ($partid, $vid, $vtype) = @_;
+    my @vtypes = ('rw', 'ro', 'bk');
+    my $ndirty = 0;
+    my $pvid;
 
-
-    if ($opt_verbose) {
-        print "# scanning partition $partid volume $vid\n";
+    if ($OPT_VERBOSE) {
+        print "scanning volume $vid\n";
     }
-    open(my $pipe, "$volscan -noheading -part $partid -volume $vid -find dir -output namei |") or
-        die "Failed to run volscan: $!";
+
+    if ($OPT_CHECKOUT) {
+        my $cmd = "$VOS offline -server localhost -partition $partid -id $vid -localauth";
+        my $rc = system($cmd);
+        if ($rc != 0) {
+            warn "Failed to run vos offline: $rc";
+            return;
+        }
+    }
+
+    my $vtypeid = 0;
+    my $cmd = "$VOLINFO -part $partid -volume $vid";
+    open(my $pipe, "$cmd |") or die "Failed to run volinfo: $!";
     while (<$pipe>) {
         chomp;
-        if (is_dir_dirty($_)) {
-            $dirty = 1;
-            last;
-        }
+        $vtypeid = $1 if /^type = (\d+)/;
+        $pvid = $1 if /parentId = (\d+)/;
     }
     close($pipe);
-    return $dirty;
+    $vtype = $vtypes[$vtypeid];
+
+    $cmd = "$VOLSCAN -part $partid -volume $vid -find dir -output namei -noheading";
+    open($pipe, "$cmd |") or die "Failed to run volscan: $!";
+    while (<$pipe>) {
+        chomp;
+        $ndirty += scan_directory($_);
+    }
+    close($pipe);
+
+    printf("%s %s %s %s %d\n", $partid, $vtype, $vid, $pvid, $ndirty);
+
+    if ($OPT_CHECKOUT) {
+        my $cmd = "$VOS online -server localhost -partition $partid -id $vid -localauth";
+        my $rc = system($cmd);
+        if ($rc != 0) {
+            die "Failed to run vos online: $rc";
+        }
+    }
 }
 
-#
-# Scan all the partitions and check for volumes with dirty directory objects.
-#
-# Read-write volumes can be cleaned by the salvager with -salvagedirs. Backup
-# and read-only volumes can be cleaned by cleaning the parent rw volume then
-# recloning/releasing.
-#
-sub find_dirty_volumes {
-    my ($partid, $vtype, $vid, $pvid);
-    my @vtypename = ('rw', 'ro', 'bk');
+sub scan_partition {
+    my ($partid) = @_;
+    my $vid;
 
-    open(my $pipe, "$volinfo |") or die "Failed to run volinfo: $!";
+    if ($OPT_VERBOSE) {
+        print "scan partition: $partid\n";
+    }
+    open(my $pipe, "$VOS listvol -server localhost -partition $partid -fast -localauth|")
+        or die "Failed to run vos: $!";
     while (<$pipe>) {
-        $partid = $1 if /^Processing Partition \/vicep(\w+):/;
-        $vid = $1 if /^Volume header for volume (\d+)/;
-        $vtype = $1 if /^type = (\d+)/;
-        $pvid = $1 if /parentId = (\d+)/;
-        if (/^volUpdateCounter/) { # end if this volume
-            if (is_vol_dirty($partid, $vid)) {
-                printf("%s %s %d %d\n", $partid, $vtypename[$vtype], $vid, $pvid);
-            }
+        chomp;
+        if (/^(\d+)/) {
+            $vid = $1;
         }
     }
     close($pipe);
+}
+
+sub scan_partitions {
+    my $opt_part = ($_[0] ? "-partition $_[0]" : "");
+    my $partid;
+    my $vname;
+    my $vid;
+    my $vtype;
+
+    if ($OPT_VERBOSE) {
+        print "scan partitions\n";
+    }
+
+    open(my $pipe, "$VOS listvol -server localhost $opt_part -localauth|")
+        or die "Failed to run vos: $!";
+    while (<$pipe>) {
+        chomp;
+        if (/^\s*$/) {
+            next;
+        }
+        if (/^Total .* partition \/vicep(\w+)/) {
+            $partid = $1;
+            next;
+        }
+        if (/^(\S+)\s+(\d+)\s+(\S+)/) {
+            $vname = $1;
+            $vid = $2;
+            $vtype = lc($3);
+            if ($OPT_VERBOSE > 1) {
+                print "partid=$partid, vname=$vname, vtype=$vtype, vid=$vid\n";
+            }
+            if (grep(/^$vtype$/, @OPT_VTYPES)) {
+                scan_volume($partid, $vid, $vtype);
+            }
+            next;
+        }
+    }
+    close($pipe);
+}
+
+sub usage {
+    my $progname = basename($MYNAME);
+    print "usage: $progname all [--checkout] [--rw] [--ro] [--bk] [-v|--verbose]\n";
+    print "usage: $progname part <partid> [--checkout] [--rw] [--ro] [--bk] [-v|--verbose]\n";
+    print "       $progname vol <partid> <vid> [--checkout] [-v|--verbose]\n";
+    exit(1);
 }
 
 sub main {
-    GetOptions("verbose"  => \$opt_verbose) or die "usage: $0 [--verbose]\n";
-    find_dirty_volumes();
+    my $cmd = shift(@ARGV) or usage();
+    my @verbose = ();
+    my ($rw, $ro, $bk);
+    GetOptions(
+        "v|verbose" => \@verbose,  # Additional -v flags increase the verbosity.
+        "checkout" => \$OPT_CHECKOUT,
+        "rw" => \$rw,
+        "ro" => \$ro,
+        "bk" => \$bk,
+        "vtype=s" => \@OPT_VTYPES,
+    ) or usage();
+
+    $OPT_VERBOSE = scalar(@verbose);
+    if ($rw) {
+        push(@OPT_VTYPES, 'rw');
+    }
+    if ($ro) {
+        push(@OPT_VTYPES, 'ro');
+    }
+    if ($bk) {
+        push(@OPT_VTYPES, 'bk');
+    }
+    if (scalar(@OPT_VTYPES) == 0) {
+        @OPT_VTYPES = ('rw', 'ro', 'bk');
+    }
+
+    if ($cmd eq 'all') {
+        scan_partitions();
+    } elsif ($cmd eq 'part') {
+        my $partid = shift(@ARGV) or usage();
+        scan_partitions($partid);
+    } elsif ($cmd eq 'vol') {
+        my $partid = shift(@ARGV) or usage();
+        my $vid = shift(@ARGV) or usage();
+        scan_volume($partid, $vid, undef);
+    } else {
+        usage();
+    }
 }
 
 main();
