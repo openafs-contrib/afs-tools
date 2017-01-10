@@ -83,6 +83,14 @@ value).
 
 =over 8
 
+=item file server has no volumes
+
+Warn if a file server entry has been found in the vldb which does not have
+volumes. This can indicate a new server has been started but not populated with
+volumes yet, or all the volumes have been removed from a server, but the server
+entry was not removed from the vldb.  If the server has been decommissioned,
+use the B<vos remaddrs> command to remove the server entry from the vldb.
+
 =item missing ro clone sites
 
 Search for replicated volumes which do not have a read-only defined
@@ -261,6 +269,11 @@ sub is_dir_empty
 }
 
 #------------------------------------------------------------------
+# Warn about old server address records no volumes have been found
+# for a server address, so admins remember to vos remaddr after
+# decommissioning servers.  This also could just be a new file
+# server which has registered with the vldb, but no volumes have
+# been put on it yet.
 sub check_for_old_servers
 {
     my $servers = shift;
@@ -268,8 +281,9 @@ sub check_for_old_servers
 
     foreach my $uuid (keys(%{ $servers->{u2a} })) {
         unless ($active{$uuid}) {
-            check_failed("old file server in vldb: $uuid (".
-                join(", ", @{ $servers->{u2a}->{$uuid} }) .")");
+            check_failed("file server has no volumes: $uuid (".
+                join(", ", @{ $servers->{u2a}->{$uuid} }) .") ".
+                     "use 'vos remaddrs' to remove old server entries.");
         }
     }
 }
