@@ -93,12 +93,14 @@ def setup_logging(filename, level):
     # Update the logger to log to a file instead of stderr now that we have
     # the log filename and level.
     logger = logging.getLogger()
-    old_handler = logger.handlers[0]
-    new_handler = logging.FileHandler(filename)
-    new_handler.setLevel(LOG_LEVELS[level])
-    new_handler.setFormatter(logging.Formatter(LOG_FILE_FORMAT))
-    logger.addHandler(new_handler)
-    logger.removeHandler(old_handler)
+    if filename != '-':
+        debug("writing log messages to file {}".format(filename))
+        old_handler = logger.handlers[0]
+        new_handler = logging.FileHandler(filename)
+        new_handler.setLevel(LOG_LEVELS[level])
+        new_handler.setFormatter(logging.Formatter(LOG_FILE_FORMAT))
+        logger.addHandler(new_handler)
+        logger.removeHandler(old_handler)
     logger.setLevel(LOG_LEVELS[level])
 
 def read_config():
@@ -115,8 +117,8 @@ def read_config():
         c.add_section('logging')
     if not c.has_option('logging', 'level'):
         c.set('logging', 'level', 'info')
-    if not c.has_option('logging', 'file'):
-        c.set('logging', 'file', '/tmp/xstat.log')
+    if not c.has_option('logging', 'filename'):
+        c.set('logging', 'filename', '-') # default to stdout
 
     if not c.has_section('collect'):
         c.add_section('collect')
@@ -139,7 +141,7 @@ def read_config():
 
     if not os.path.exists(filename): # Dont clobber existing config.
         with open(filename, 'w') as f:
-            info("writing config file {}".format(filename))
+            info("Writing config file {}".format(filename))
             c.write(f)
     return c
 
@@ -164,7 +166,7 @@ def detect_cellname():
     """Detect the current cellname with the fs command.
 
     This assumes the current host is running an OpenAFS client."""
-    info("searching for cellname")
+    info("Searching for cellname")
     cellname = None
     cmd = [which('fs'), 'wscell']
     debug(subprocess.list2cmdline(cmd))
@@ -174,12 +176,12 @@ def detect_cellname():
             match = re.match(r"This workstation belongs to cell '([^']+)'", line)
             if match:
                 cellname = match.group(1)
-    info("cellname is {}".format(cellname))
+    info("Cellname is {}".format(cellname))
     return cellname
 
 def detect_fileservers(cellname):
     """Detect the file servers with the vos listaddrs command."""
-    info("searching for file servers in cell {}".format(cellname))
+    info("Searching for file servers in cell {}".format(cellname))
     uuids = {}
     uuid = None
     cmd = [which('vos'), 'listaddrs', '-printuuid', '-noresolve', '-noauth', '-cell', cellname]
@@ -195,6 +197,7 @@ def detect_fileservers(cellname):
             if match:
                 addr = match.group(1)
                 uuids[uuid].append(addr)
+    info("Found servers: {}".format(pprint.pformat(uuids)))
     return uuids
 
 def get_usage(command):
@@ -257,14 +260,14 @@ running = True
 def sigint_handler(signal, frame):
     global running
     sys.stdout.write("\nquitting...\n")
-    info("SIGINT caught, quitting")
+    info("Signal SIGINT caught.")
     running = False
 
 def main():
     global running
 
     config = read_config()
-    setup_logging(config.get('logging','file'), config.get('logging','level'))
+    setup_logging(config.get('logging','filename'), config.get('logging','level'))
     destdir = os.path.expanduser(config.get('collect', 'destdir'))
     mkdirp(destdir)
     check_commands() # Exits if the required commands are missing.
@@ -279,7 +282,6 @@ def main():
                 timestamp = time.strftime('%Y-%m-%d')
                 filename = os.path.join(destdir, "{}-{}.dat".format(cellname, timestamp))
                 for server in servers:
-                    info("Writing stats for server {} to file {}".format(server, filename))
                     with open(filename, 'a') as out:
                         try:
                             rxstats(server, '7000', out)
@@ -287,15 +289,16 @@ def main():
                             xstat_fs(server, '3', out)
                         except Exception as e:
                             error("Exception: {}".format(e))
+                    info("Wrote stats for server {} to file {}".format(server, filename))
         if running:
             if config.getboolean('collect', 'once'):
-                info("once option set, quitting")
+                info("Once option set, quitting.")
                 running = False
             else:
                 sleep = int(config.get('collect', 'sleep'))
                 debug('sleep {}'.format(sleep))
                 time.sleep(sleep)
-    info('Done.')
+    info('Exiting.')
 
 if __name__ == "__main__":
     main()
