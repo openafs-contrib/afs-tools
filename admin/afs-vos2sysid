@@ -1,0 +1,89 @@
+#!/usr/bin/perl -wT
+#
+# query the AFS VLDB for an existing server entry
+# convert to the format of the /usr/afs/local/sysid file
+# * single IP address only
+use strict;
+use Getopt::Long;
+use Sys::Hostname;
+$ENV{'PATH'}='/sbin:/usr/bin:/usr/sbin';
+
+my ($opt_help, $opt_noaction, $opt_verbose);
+my $opt_filename = '/tmp/sysid';
+my $hostname = hostname() or die "ERROR: cannot determine local hostname\n";
+
+sub usage {
+    my $code = shift;
+    print <<EOFusage;
+$0: [--verbose] [--host=HOST] [--file=FILE]
+
+Recreate an AFS sysid(5) file based on information from VLDB.
+Default for HOST is this machine, default file is $opt_filename
+EOFusage
+    exit $code;
+}
+
+# main
+GetOptions ("help" => \$opt_help,
+	    'host=s' => \$hostname,
+	    'file=s' => \$opt_filename,
+	    "verbose" => \$opt_verbose) or usage(1);
+if($opt_help) {
+    usage(0);
+}
+if($hostname =~ m/^(\w+)$/) {
+    $hostname = $1;
+} else {
+    die "ERROR: cannot understand host '$hostname'\n";
+}
+
+my $uuid_string;
+my @ips;
+
+my @vos_listaddrs = `vos listaddrs -printuuid -host '$hostname' -noresolve -noauth 2>&1`;
+
+for my $line (@vos_listaddrs) {
+    chomp($line);
+    if ($line =~ m/no entry for host .* found in VLDB/) {
+	print STDERR "WARN: $line\n";
+	exit(1);
+    } elsif ($line =~ m/Can.t get host info for/) {
+	print STDERR "WARN: $line\n";
+	exit(1);
+    } elsif ((! $uuid_string) and $line =~ m/^UUID:\s+([-0-9a-f]{37})/) {
+	$uuid_string = $1;
+	$uuid_string =~ s/-//g; # remove decoration
+    } elsif ($line =~ m/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) {
+	my $ip_string = $1;
+	push(@ips, $ip_string);
+    } elsif ($line =~ m/^\s*$/) {
+	next;
+    } else {
+	die "ERROR: cannot parse line '$line' in\n".join("\n",@vos_listaddrs);
+    }
+}
+die "ERROR: did not find a UUID in\n".join("\n",@vos_listaddrs) unless $uuid_string;
+die "ERROR: did not find any IP adress in".join("\n",@vos_listaddrs) unless $#ips >= 0;
+
+print "DEBUG: got UUID:$uuid_string for $hostname [".join(',',@ips)."]\n" if ($opt_verbose);
+
+my $sysid_magic = 0x88aabbcc;  # src/viced/viced.c
+my $sysid_version = 1;
+
+my @uuid_quads = unpack('A8'x4, $uuid_string);
+my @uuid = map { hex } @uuid_quads;
+
+my $binstring = pack('LL NNNN L',
+		     $sysid_magic, $sysid_version,
+		     @uuid,
+		     ($#ips +1));
+
+for my $ip_string (@ips) {
+    my @ip = split(/\./,$ip_string);
+    $binstring .= pack('C4', @ip);
+}
+
+open(SYSID,'>',$opt_filename) or die "ERROR: cannot write $opt_filename:$!\n";
+print SYSID $binstring;
+close(SYSID) or die "ERROR: cannot close $opt_filename:$!\n";
+print "INFO: wrote $opt_filename\n" if ($opt_verbose);
