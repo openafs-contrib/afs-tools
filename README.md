@@ -20,8 +20,9 @@
 This is a collection of tools to aid in administration and debugging the
 OpenAFS distributed filesystem.
 
-## Administrative tools
+## Administration
 
+  * `afs-client-accessd` - gather access info from the audit log into a database
   * `afsdirstat` - report afs directory statistics
   * `afs-dumpster` - nightly dumps of afs volumes
   * `afsfree` - report free space on afs servers
@@ -30,15 +31,9 @@ OpenAFS distributed filesystem.
   * `afs-vol-check` - check for volume inconsistencies
   * `afs-vol-paths` - process output of volscan
   * `afs-vos2sysid` - rebuild `/afs/usr/local/sysid` from VLDB
-
-### Client access database
-
-  * `afs-client-accessd` - gather access info from the audit log into a database
-
-### Monitoring
-
   * `cw_graphify.pl` - use gnuplot to graph fileserver "calls waiting for thread"
   * `snips` - `snips` monitoring plugin for AFS
+  * `xstat.py` - gather server statistics (requires a patched `xstat_fs_test`)
 
 ## Troubleshooting
 
