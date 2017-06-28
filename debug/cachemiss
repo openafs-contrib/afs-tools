@@ -15,7 +15,7 @@
 #
 #--------------------------------------------------------------------
 #
-# usage: xstat_cm_debug <hostname> -co 2 -once | cachemiss
+# usage: xstat_cm_test <hostname> -co 2 -once | cachemiss
 #
 
 $hit = {};
