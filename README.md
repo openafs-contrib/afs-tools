@@ -34,8 +34,9 @@ OpenAFS distributed filesystem.
   * `cw_graphify.pl` - use gnuplot to graph fileserver "calls waiting for thread"
   * `snips` - `snips` monitoring plugin for AFS
   * `xstat.py` - gather server statistics (requires a patched `xstat_fs_test`)
+  * `openafs-wiki-gerrits` - update the list of open gerrit changes on wiki.openafs.org
 
-## Troubleshooting
+## Troubleshooting and debugging
 
   * `cachemiss` - report cache miss rates
   * `cachestat` - report what is cached for certain files
