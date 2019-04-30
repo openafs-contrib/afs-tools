@@ -37,11 +37,10 @@ def list_gerrits(fh, branch):
             .format(**change))
     fh.write('</table>')
 
-def update_page(filename, branches):
+def update_page(filename, branch):
     info('Updating page ' + filename)
     with open(filename, 'w') as fh:
-        for branch in branches:
-            list_gerrits(fh, branch)
+        list_gerrits(fh, branch)
     git.add(filename)
 
 def main():
@@ -53,8 +52,9 @@ def main():
         git.remote('add', 'gerrit', 'ssh://gerrit.openafs.org/openafs-wiki.git')
         git.fetch('gerrit', _fg=True)
         git.reset('gerrit/master', '--hard', _fg=True)
-        update_page('devel/GerritsForStable.mdwn', ['openafs-stable-1_6_x', 'openafs-stable-1_8_x'])
-        update_page('devel/GerritsForMaster.mdwn', ['master'])
+        update_page('devel/GerritsForMaster.mdwn', 'master')
+        update_page('devel/GerritsForStable.mdwn', 'openafs-stable-1_8_x')
+        update_page('devel/GerritsForOldStable.mdwn', 'openafs-stable-1_6_x')
         try:
             git.commit('-m', 'update gerrit list', _fg=True)
         except ErrorReturnCode_1:
