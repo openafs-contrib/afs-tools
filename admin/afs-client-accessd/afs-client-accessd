@@ -156,6 +156,15 @@ Example:
 
   AUDIT_PATH => '/usr/afs/logs/FileAudit',
 
+=item EXPORT_TIME
+
+This specifies the hour of the day (UTC) in which the *.sqlite files should be
+exported to the central host. The default is 0 (midnight).
+
+Example:
+
+  EXPORT_TIME => 16,
+
 =item SQLITE_PREFIX
 
 This specifies the directory in which the local disk databases will be stored
@@ -581,6 +590,7 @@ read_config()
 
 		MSGRCV_WORKAROUND => 0,
 		USE_FQDN => 0,
+		EXPORT_TIME => 0,
 	);
 
 	if (!-r $CONFIG_FILE) {
@@ -600,6 +610,11 @@ read_config()
 	for (keys %override) {
 		$newcfg{$_} = $override{$_};
 	}
+
+	if ($newcfg{EXPORT_TIME} < 0 || $newcfg{EXPORT_TIME} > 24) {
+		$newcfg{EXPORT_TIME} = 0;
+	}
+	$newcfg{EXPORT_TIME} = $newcfg{EXPORT_TIME} * 60 * 60;
 
 	my $err = '';
 	if (! -d $newcfg{SQLITE_PREFIX}) {
@@ -1230,6 +1245,27 @@ spawn_exporter()
 	exit(0);
 }
 
+sub
+time_to_export()
+{
+	my $current_time = time();
+
+	my $sec_per_day = 24 * 60 * 60;
+	my $midnight = $current_time - ($current_time % $sec_per_day);
+
+	my $exp_time = $midnight + $CFG{EXPORT_TIME};
+
+	my $fluctuation = 90;
+	my $range = (ALARM_INTERVAL / 2) + $fluctuation;
+
+	if (($current_time > ($exp_time - $range)) &&
+	    ($current_time <= ($exp_time + $range))) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
 my $checksignals_firstrun = 1;
 # check for changes flagged by a signal handler
 sub
@@ -1295,10 +1331,6 @@ checksignals()
 
 		stop_collection($next_dbname);
 
-		# export database in the background
-		d("Spawning exporter due to db name change");
-		spawn_exporter();
-
 		$CUR_DBNAME = $next_dbname;
 
 		# set up our sqlite stuff again so we can record new data to it
@@ -1319,6 +1351,18 @@ checksignals()
 		# constantly scan for databases, since when the exporter exits
 		# it will trigger another exporter and so on...
 		d("Spawning exporter due to non-audit non-child");
+		spawn_exporter();
+	}
+
+	my $sig_alarm = 0;
+
+	if (!$SIGNAL_SHUTDOWN && !$SIGNAL_CHILD && !$SIGNAL_CONFIG) {
+		$sig_alarm = 1;
+	}
+
+	if (!$EXPORTER_PID && $sig_alarm && time_to_export()) {
+		# export database in the background
+		d("Spawning exporter due to time_to_export");
 		spawn_exporter();
 	}
 

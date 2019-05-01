@@ -35,6 +35,12 @@ AUDIT_PATH => '/usr/afs/logs/FileAudit',
 
 SQLITE_PREFIX => '/var/afs-accessdb',
 
+# EXPORT_TIME specifies the hour of the day in which the databases from
+# SQLITE_PREFIX should be exported to the central host. The timezone is UTC and
+# the default value is 0 (midnight).
+
+EXPORT_TIME => 16,
+
 # RHEL 5.x broken msgrcv workaround. msgrcv fails supriously
 # on older versions of RHEL 5.x without setting the errno. strace
 # shows ERESTARTNOHAND errors.
