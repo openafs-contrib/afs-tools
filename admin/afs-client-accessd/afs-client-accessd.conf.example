@@ -169,3 +169,40 @@ ORACLE_PASSWORD => 'secret',
 # afs-client-accessd is running.
 
 ORACLE_TABLE => 'afsclientaccesses',
+
+#---------------------------------------------------------------------------------
+# Configuration for sqlldr export mode (--mode sqlldr)
+#---------------------------------------------------------------------------------
+
+# ORACLE_USER specifies the username to use when we export data to the central Oracle
+# database.
+#
+# This option is required for the "sqlldr" export mode, and has no default. This
+# option can be changed while afs-client-accessd is running.
+
+ORACLE_USER => 'scott',
+
+# ORACLE_PASSWORD specifies the password to use when we export data to the
+# central Oracle database. This option is required for the "sqlldr" export mode,
+# and has no default. This option can be changed while afs-client-accessd is
+# running.
+
+ORACLE_PASSWORD => 'secret',
+
+# ORACLE_TABLE specifies the table name to use when we export data to the central
+# Oracle database. Defaults to "accesses". This table must exist before we can
+# export data to the Oracle database. This option can be changed while
+# afs-client-accessd is running.
+
+ORACLE_TABLE => 'afsclientaccesses',
+
+# SQLLDR_BIN specifies the path to the SQL*Loader binary. Defaults to
+# sqlldr. This option can be changed while afs-client-accessd is running.
+
+SQLLDR_BIN => '/opt/oracle/product/18c/dbhomeXE/bin/sqlldr',
+
+# SQLLDR_HOST specifies the hostname of the server running the Oracle Database.
+# This option is required for the "sqlldr" export mode, and has no default. This
+# option can be changed while afs-client-accessd is running.
+
+SQLLDR_HOST => 'localhost',
