@@ -67,6 +67,12 @@ currently understands the following export modes:
 In this export mode, we push the data in our local database files to the
 configured Oracle database, using the ORACLE_* options in the configuration.
 
+=item sqlldr
+
+In this export mode, we use SQL*Loader to push the data in our local database
+files to the configured Oracle database, using the ORACLE_* / SQLLDR_* options
+in the configuration.
+
 =item ssh
 
 In this export mode, we transfer the local database files to a central host
@@ -289,13 +295,16 @@ Example:
 
 =item ORACLE_HOME
 
-This specifies the ORACLE_HOME variable used for the Oracle client driver.
+This specifies the ORACLE_HOME variable used for the Oracle client driver and
+SQL*Loader.
+
 B<afs-client-accessd> will attempt to set the various Oracle environment
 variables according to this value (ORACLE_HOME, and LD_LIBRARY_PATH), if they
 are not already set when B<afs-client-accessd> is started.
 
-This option has no default, and is mandatory for the "oracle" export mode. This
-option may NOT be changed while B<afs-client-accessd> is running.
+This option has no default, and is mandatory for the "oracle" and "sqlldr"
+export mode. This option may NOT be changed while B<afs-client-accessd> is
+running.
 
 Example:
 
@@ -336,8 +345,8 @@ database. It's also possible to specify the database and password in this
 field, but it's probably less confusing to leave those to the ORACLE_DSN and
 ORACLE_PASSWORD directives.
 
-This option is required for the "oracle" export mode, and has no default. This
-option can be changed while B<afs-client-accessd> is running.
+This option is required for the "oracle" and "sqlldr" export modes, and has
+no default. This option can be changed while B<afs-client-accessd> is running.
 
 Example:
 
@@ -346,8 +355,9 @@ Example:
 =item ORACLE_PASSWORD
 
 This specifies the password to use when we export data to the central Oracle
-database. This option is required for the "oracle" export mode, and has no
-default. This option can be changed while B<afs-client-accessd> is running.
+database. This option is required for the "oracle" and "sqlldr" export modes,
+and has no default. This option can be changed while B<afs-client-accessd>
+is running.
 
 Example:
 
@@ -363,6 +373,37 @@ B<afs-client-accessd> is running.
 Example:
 
   ORACLE_TABLE => 'afsclientaccesses',
+
+=item ORACLE_TNS_ADMIN
+
+This specifies the directory where the SQL*Net configuration files can be found
+(e.g. sqlnet.ora and tnsnames.ora). This option is not mandatory and should only
+be used if these configuration files are not in the default location
+($ORACLE_HOME/network/admin). This option may NOT be changed while
+B<afs-client-accessd> is running.
+
+Example:
+
+  ORACLE_TNS_ADMIN => '/opt/oracle/product/18c/dbhomeXE/network/admin',
+
+=item SQLLDR_BIN
+
+This specifies the path to the SQL*Loader binary. Defaults to sqlldr. This
+option can be changed while afs-client-accessd is running.
+
+Example:
+
+  SQLLDR_BIN => '/opt/oracle/product/18c/dbhomeXE/bin/sqlldr',
+
+=item SQLLDR_SERVICENAME
+
+This specifies the service name of the target database. This option is required
+for the "sqlldr" export mode, and has no default. This option can be changed
+while afs-client-accessd is running.
+
+Example:
+
+  SQLLDR_SERVICENAME => 'XE',
 
 =back
 
@@ -497,7 +538,7 @@ my $SQLITE_TEMP;
 # pid for the active 'exporter' process for writing to Oracle; 0 if none
 my $EXPORTER_PID = 0;
 
-# whether we export data via Oracle or ssh
+# whether we export data via Oracle, ssh or sqlldr
 my $EXPORT_MODE;
 
 # whether we are processing audit logs from the fileserver
@@ -516,6 +557,10 @@ my $SIGNAL_SHUTDOWN = 0;
 my $SIGNAL_CONFIG = 0;
 my $SIGNAL_CHILD = 0;
 my $SIGNALLED = 0;
+
+# globals used by sqlldr
+my $SQLLDR_CTL = "/tmp/sqlldr.ctl";
+my $SQLLDR_LOG = "/tmp/sqlldr.log";
 
 #
 # logging
@@ -581,6 +626,7 @@ read_config()
 
 		MSGRCV_WORKAROUND => 0,
 		USE_FQDN => 0,
+		SQLLDR_BIN => 'sqlldr',
 	);
 
 	if (!-r $CONFIG_FILE) {
@@ -607,7 +653,7 @@ read_config()
 	}
 
 	# these cannot change
-	for (qw(LOG_FACILITY AUDIT_PATH SQLITE_PREFIX ORACLE_HOME)) {
+	for (qw(LOG_FACILITY AUDIT_PATH SQLITE_PREFIX ORACLE_HOME ORACLE_TNS_ADMIN)) {
 		if (defined($CFG{$_}) and $CFG{$_} ne $newcfg{$_}) {
 			$err .= "$_ cannot be changed while afs-client-accessd is running:\n".
 			        "you must restart afs-client-accessd to change it\n";
@@ -631,6 +677,15 @@ read_config()
 	# mandatory for "ssh" export mode only
 	if ($EXPORT_MODE eq "ssh") {
 		for (qw(SSH_HOST)) {
+			if (!defined($newcfg{$_})) {
+				$err .= "$_ not specified\n";
+			}
+		}
+	}
+	# mandatory for "sqlldr" export mode only
+	if ($EXPORT_MODE eq "sqlldr") {
+		for (qw(ORACLE_HOME SQLLDR_BIN SQLLDR_SERVICENAME ORACLE_USER
+				ORACLE_PASSWORD)) {
 			if (!defined($newcfg{$_})) {
 				$err .= "$_ not specified\n";
 			}
@@ -1002,6 +1057,134 @@ oracle_export(@)
 	$oracle_dbh->disconnect();
 }
 
+# Open a pipe connecting stdout to sqlldr
+sub
+sqlldr_start()
+{
+	trace();
+	my $login = "$CFG{ORACLE_USER}/$CFG{ORACLE_PASSWORD}";
+	my $servname = "$CFG{SQLLDR_SERVICENAME}";
+	my $control = $SQLLDR_CTL;
+	my $log = $SQLLDR_LOG;
+
+	my $sqlldr = "$CFG{SQLLDR_BIN}" . " $login\@$servname control=$control log=$log";
+
+	open(SQLLDR_PIPE, "| $sqlldr >/dev/null 2>&1") or die "sqlldr: could not open pipe: $!\n";
+
+	# Disable buffering
+	my $old_fh = select(SQLLDR_PIPE);
+	$| = 1;
+	select($old_fh);
+}
+
+# Close pipe and log status
+sub
+sqlldr_end($)
+{
+	trace();
+	my $total_time = shift;
+	my $log_msg = "";
+	my $exit;
+
+	close(SQLLDR_PIPE);
+	$exit = $? >> 8;
+
+	open(my $fh, '<', $SQLLDR_LOG) or die "sqlldr: could not open log file: $!\n";
+	while (<$fh>) {
+		if (index($_, "successfully loaded") != -1 or
+			index($_, "not loaded due to data errors") != -1) {
+			chomp($_);
+			$_ =~ s/^\s+//;
+			$log_msg .= $_ . " ";
+		}
+	}
+	$log_msg .= "Total time: $total_time seconds.\n";
+	vlog($log_msg);
+	close $fh;
+
+	if ($exit) {
+		die("sqlldr: unknown error\n");
+	}
+}
+
+# Export a single database to Oracle through sqlldr
+sub
+sqlldr_export_db($$$$)
+{
+	trace();
+	my ($sqlite_dbh, $hostname, $path, $timestr) = @_;
+
+	vlog("Exporting database $path to Oracle (sqlldr) as server $hostname, time $timestr");
+
+	my $sqlite_sth = $sqlite_dbh->prepare("SELECT host, volid FROM access");
+	$sqlite_sth->execute();
+
+	# when we fetch a row, the 1st column will go in $host, and the 2nd
+	# column will go in $volid. This is slightly faster than other methods,
+	# since we don't need to get these values from a return from a
+	# a function, or pass them into a function for every single fetch
+	my ($host, $volid);
+	$sqlite_sth->bind_col(1, \$host, { TYPE => SQL_INTEGER });
+	$sqlite_sth->bind_col(2, \$volid, { TYPE => SQL_INTEGER });
+
+	# open a pipe connecting stdout to sqlldr
+	sqlldr_start();
+	my $start = time;
+
+	while ($sqlite_sth->fetch()) {
+		# convert $host from an NBO integer into a dotted quad string
+		my $hoststr = join('.', unpack('C4', pack('N', $host)));
+
+		d("Inserting row, path $path, data [$hostname, $timestr, $hoststr, $volid]") if (DEBUG);
+		print(SQLLDR_PIPE "$hostname,$timestr,$volid,$hoststr\n");
+	}
+
+	my $end = time;
+	# close pipe and log status
+	sqlldr_end($end - $start);
+}
+
+# Export all of the given databases to Oracle through sqlldr
+sub
+sqlldr_export(@)
+{
+	trace();
+	my @dbs = @_;
+
+	# for each sqlite database file that we found, open it and call
+	# sqlldr_export_db on it
+	for (@dbs) {
+		my $sqlite_dbh;
+		my $path = $_->{path};
+		my $timestr = $_->{timestr};
+		my $hostname = $_->{hostname};
+		my $err = 0;
+
+		eval {
+			$sqlite_dbh = sqlite_dbopen($path);
+			sqlldr_export_db($sqlite_dbh, $hostname, $path, $timestr);
+		};
+		if ($@) {
+			verr("Error exporting sqlite db $path to Oracle (sqlldr): $@");
+			$err = 1;
+		}
+		if ($sqlite_dbh) {
+			# make sure to cleanup the sqlite connection, even if we
+			# got errors above
+			eval { $sqlite_dbh->disconnect(); };
+			if ($@) {
+				verr("Error closing sqlite db $path: $@");
+			}
+		}
+
+		if (!$err) {
+			# if we exported everything to oracle without error,
+			# get rid of the sqlite db
+			unlink($path);
+		}
+	}
+}
+
 # Get the local hostname, but make sure we don't include any "weird" characters,
 # since we use this in path names and such.
 sub get_hostname()
@@ -1220,6 +1403,8 @@ spawn_exporter()
 		ssh_export(@dbs);
 	} elsif ($EXPORT_MODE eq "oracle") {
 		oracle_export(@dbs);
+	} elsif ($EXPORT_MODE eq "sqlldr") {
+		sqlldr_export(@dbs);
 	} else {
 		die("Internal error: weird export mode $EXPORT_MODE");
 	}
@@ -1438,6 +1623,49 @@ oracle_env()
 	require DBD::Oracle;
 }
 
+# set up sqlldr environment stuff
+sub
+sqlldr_env()
+{
+	trace();
+	# Using sqlldr requires some environment variables to be set.
+
+	if (!(defined($ENV{ORACLE_HOME}) and $ENV{ORACLE_HOME} eq $CFG{ORACLE_HOME})) {
+		$ENV{ORACLE_HOME} = $CFG{ORACLE_HOME};
+	}
+	if (defined($CFG{ORACLE_TNS_ADMIN})) {
+		$ENV{TNS_ADMIN} = $CFG{ORACLE_TNS_ADMIN};
+	}
+}
+
+# create control file and log file used by sqlldr
+sub
+sqlldr_conf()
+{
+	trace();
+	my $rows = ROW_BATCHSIZE;
+
+	open(my $ctl, '>', $SQLLDR_CTL) or die "cannot open sqlldr control file: $!\n";
+
+	# errors=9999999:
+	# 	Regardless of the number of errors, do not interrupt the load process;
+	# rows=ROW_BATCHSIZE:
+	# 	Commit data to the oracle db ROW_BATCHSIZE rows at a time;
+	print $ctl "options (errors=9999999, rows=$rows)\n";
+	print $ctl "load data\n";
+	print $ctl "characterset WE8ISO8859P1\n";
+	print $ctl "infile \'-\'\n";
+	print $ctl "append\n";
+	print $ctl "into table $CFG{ORACLE_TABLE}\n";
+	print $ctl "fields terminated by \",\"\n";
+	print $ctl "( server, time, volid, host )";
+
+	close $ctl;
+
+	open(my $log, '>', $SQLLDR_LOG) or die "cannot open sqlldr log file: $!\n";
+	close $log;
+}
+
 sub
 recv_loop()
 {
@@ -1585,6 +1813,27 @@ test_oracle_conn()
 	exit(0);
 }
 
+# check if SQL*Loader can load data into the db
+sub
+test_sqlldr_conn()
+{
+	trace();
+	my $login = "$CFG{ORACLE_USER}/$CFG{ORACLE_PASSWORD}";
+	my $servname = "$CFG{SQLLDR_SERVICENAME}";
+	my $control = $SQLLDR_CTL;
+	my $log = $SQLLDR_LOG;
+	my $sqlldr = "$CFG{SQLLDR_BIN}" . " $login\@$servname control=$control log=$log";
+
+	print "Testing SQL*Loader...\n";
+	my $output = qx(echo | $sqlldr);
+	if (index($output, "successfully") != -1) {
+		print "Success!\n";
+	} else {
+		print "Failed\n";
+	}
+	exit(0);
+}
+
 sub
 usage()
 {
@@ -1633,7 +1882,7 @@ if ($ENV{SSH_ORIGINAL_COMMAND}) {
 GetOptions(%optspec) or usage();
 defined($CONFIG_FILE) or usage();
 defined($EXPORT_MODE) or usage();
-($EXPORT_MODE =~ m/^oracle|ssh|internal-recv$/) or usage();
+($EXPORT_MODE =~ m/^oracle|ssh|internal-recv|sqlldr$/) or usage();
 
 if ($no_auditlog) {
 	$AUDIT_ENABLED = 0;
@@ -1646,6 +1895,13 @@ if ($EXPORT_MODE eq "oracle") {
 
 	if ($check) {
 		test_oracle_conn();
+	}
+} elsif ($EXPORT_MODE eq "sqlldr") {
+	sqlldr_env();
+	sqlldr_conf();
+
+	if ($check) {
+		test_sqlldr_conn();
 	}
 } else {
 	if ($check) {
