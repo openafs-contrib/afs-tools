@@ -231,18 +231,17 @@ class VLDB0:
         addr = start
         if addr is None:
             addr = self.vl_header.headersize
-        while True:
+        while addr < self.vl_header.eofPtr:
             #print("trying address %u" % addr)
             entry = self.vlreadentry(addr)
             #print("entry: %s" % str(entry))
-            yield entry
-
             if entry.flags == 0x8:
                 # sizeof mh entry
                 addr += 8192
             else:
                 # sizeof(vlentry)
                 addr += 148
+                yield entry
 
     def lookup_name(self, volname):
         idx = self.hash_name(volname)
