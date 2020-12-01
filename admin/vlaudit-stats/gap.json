@@ -1,0 +1,118 @@
+{
+  "audit": {
+    "gaps": [
+      {
+        "n_miss": 2,
+        "from_ts": "Tue Nov 24 17:00:16 2020",
+        "now": 1607405378,
+        "to_ts": "Tue Nov 24 17:00:17 2020"
+      }
+    ],
+    "n_miss": 2,
+    "last_weird_fromts": null,
+    "n_msgs": 10,
+    "last_restart_ts": "Tue Nov 24 16:59:04 2020",
+    "n_restarts": 1,
+    "n_unreadable": 0,
+    "last_weird_toid": null,
+    "last_weird_fromid": null,
+    "n_weird": 0,
+    "last_unreadable": 0,
+    "last_weird_tots": null
+  },
+  "getentry": {
+    "neg": {
+      "max_top": 100,
+      "n_hits": 1,
+      "top": [
+        {
+          "n_hits": 1,
+          "last_req": {
+            "code": 363524,
+            "vol_requested": "vol.fake",
+            "tstamp": "Tue Nov 24 17:00:18 2020",
+            "host": "192.0.2.5"
+          },
+          "first_req": {
+            "code": 363524,
+            "vol_requested": "vol.fake",
+            "tstamp": "Tue Nov 24 17:00:18 2020",
+            "host": "192.0.2.5"
+          },
+          "vol": "vol.fake"
+        }
+      ]
+    },
+    "n_reqs": 4,
+    "pos": {
+      "max_top": 100,
+      "n_hits": 3,
+      "top": [
+        {
+          "n_hits": 2,
+          "last_req": {
+            "code": 0,
+            "vol_requested": "root.cell",
+            "vol_name": "root.cell",
+            "host": "192.0.2.5",
+            "vol_id": 536870912,
+            "tstamp": "Tue Nov 24 17:00:17 2020"
+          },
+          "first_req": {
+            "code": 0,
+            "vol_requested": "root.cell",
+            "vol_name": "root.cell",
+            "host": "192.0.2.5",
+            "vol_id": 536870912,
+            "tstamp": "Tue Nov 24 17:00:17 2020"
+          },
+          "vol": "root.cell"
+        },
+        {
+          "n_hits": 1,
+          "last_req": {
+            "code": 0,
+            "vol_requested": "536870913",
+            "vol_name": "root.cell",
+            "host": "192.0.2.5",
+            "vol_id": 536870912,
+            "tstamp": "Tue Nov 24 17:00:16 2020"
+          },
+          "first_req": {
+            "code": 0,
+            "vol_requested": "536870913",
+            "vol_name": "root.cell",
+            "host": "192.0.2.5",
+            "vol_id": 536870912,
+            "tstamp": "Tue Nov 24 17:00:16 2020"
+          },
+          "vol": "536870913"
+        }
+      ]
+    },
+    "host": {
+      "max_top": 100,
+      "n_hits": 4,
+      "top": [
+        {
+          "n_hits": 4,
+          "last_req": {
+            "code": 363524,
+            "vol_requested": "vol.fake",
+            "host": "192.0.2.5",
+            "tstamp": "Tue Nov 24 17:00:18 2020"
+          },
+          "first_req": {
+            "code": 0,
+            "vol_requested": "536870913",
+            "vol_name": "root.cell",
+            "host": "192.0.2.5",
+            "vol_id": 536870912,
+            "tstamp": "Tue Nov 24 17:00:16 2020"
+          },
+          "host": "192.0.2.5"
+        }
+      ]
+    }
+  }
+}
