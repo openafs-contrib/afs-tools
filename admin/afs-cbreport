@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# Copyright (c) 2021, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+# afs-cbreport
+#	Use the fileserver SIGXCPU dump facility to
+#   produce various reports on fileserver callbacks.
+#
+#   note: requires OpenAFS 'cbd' utility
+#
+
+self="$(basename $0)"
+
+usage() {
+    echo "$self"
+    echo " Dump callback information from an active fileserver"
+    echo " and generate various reports."
+    echo " Must be run as root/sudo on the fileserver."
+    echo " Optional parm 'dumpdir' specifies the directory for"
+    echo " dump files in a non-default path."
+    echo ""
+    echo "  sudo $self help                       # show this usage"
+    echo "  sudo $self signal                     # ask fileserver to dump callback information"
+    echo "  sudo $self summarize [dumpdir]        # show callback counts by host, sorted by count"
+    echo "  sudo $self volumes <hostix> [dumpdir] # show volumes referenced by specified host (Info: as <hoistix> using hi=NUMBER from output of summarize. ex: $self volumes 0)"
+}
+
+dumpdir_default="/usr/afs/local" # default transarc path
+cbdpath="/usr/afs/bin/cbd"       # default transarc path
+if ! myawk=$(command -v awk); then
+    echo "No awk found"
+    # exit 1
+fi
+if [ ! -x $cbdpath ]; then
+    echo "No cbd binary found"
+    # exit 1
+fi
+
+declare -a host_ips # indexed array
+declare -a host_cbs # indexed array
+maxix=-1            # max index
+
+# Signal the (da)fileserver with SIGXCPU; wait for the callback dumps to complete.
+signal_and_wait() {
+    dumpdir=$dumpdir_default
+    cb_dump="$dumpdir/callback.dump"
+
+    # This will work for both fileserver and dafileserver.
+    pkill -SIGXCPU fileserver
+
+    # Unfortunately the dumps are asynchronous from the requesters viewpoint
+    # and may take a few seconds to generate.
+    #
+    # Fileserver creates the dumps in the following order:
+    #   - hosts.dump    small, human-readable, quick
+    #   - client.dump   small, human-readable quick
+    #   - callback.dump large, binary, may take a few seconds
+
+    # Wait for callback.dump to appear
+    until [ -r $cb_dump ]; do
+        echo "$self: Waiting for $cb_dump creation..."
+        sleep 1
+    done
+
+    # Wait for callback.dump to stop growing.
+    cb_size=$(($(wc -c <$cb_dump)))
+    while [ 1 ]; do
+        echo "$self: Waiting for $cb_dump completion..."
+        sleep 5
+        tmp=$(($(wc -c <$cb_dump)))
+        if [ $cb_size -eq $tmp ]; then
+            break
+        fi
+        cb_size=$tmp
+    done
+    echo "$self: Callback dump is now available for further processing."
+}
+
+# Obtain host IP addrs and callback heads from hosts.dump.
+gethosts() {
+    hostfile=$dumpdir/hosts.dump
+
+    if [ ! -r $hostfile ]; then
+        echo "$self: Required file $hostfile not found."
+        exit 1
+    fi
+
+    # Every command in a pipe runs in its own subshell.
+    # You can set variables in a subshell, but the work
+    # does not survive subshell termination.
+    # However, the 'lastpipe' shell option instructs bash
+    # to run the last part of a pipe in the local context,
+    # not in a subshell.  In this way, variable value
+    # changes in the pipe are still available to the remainder
+    # of the script.
+    shopt -s lastpipe
+
+    $myawk <$hostfile \
+        '
+	# Each host has a single line in hosts.dump of format:
+	#   ip:<ipaddr> port:<port> hidx:<hostindex> cbid:<cbid> ...
+	# The hostindex is used to identify which host owns each callback
+	# in the output from the cbd utility.  Obtain and save the IP address
+	# and the callback id (head of chain) by hostindex, for future use.
+	# hostindex is 0-based; thus, so are our arrays.
+	/ip:/ {split($1, v, ":"); hip=v[2];
+		split($3, v, ":");  hix=v[2];
+		split($4, v, ":");  hcb=v[2];
+		print hix, hip, hcb}
+	' |
+        while read hix hip hcb rest; do
+            # The following arrays will remain in scope for the remainder
+            # of this script due to the 'lastpipe' option specified above.
+            host_ips[$hix]=$hip
+            host_cbs[$hix]=$hcb
+            if [ $hix -gt $maxix ]; then
+                maxix=$hix # remember highest index for unsparsing later
+            fi
+        done
+
+    if [ $maxix -eq -1 ]; then
+        echo "$self: There are no hosts with active callbacks; exiting"
+        exit 1
+    fi
+
+    # It is often the case that not every hostindex is in use; that is,
+    # some hosts may be inactive, or have no callbacks.  Thus there may be
+    # "holes" or sparseness in the arrays just populated.  For ease of
+    # future use, "unsparse" the arrays.
+
+    for ((i = 0; i <= $maxix; i++)); do
+        # Use bash parameter substitution to assign a placeholder value
+        # to any unassigned array elements.  Don't worry, the 'cbd' output
+        # should never refer to these unused hosts; we are only doing this
+        # for convenience in processing the hosts that _do_ have callbacks.
+        host_ips[$i]=${host_ips[$i]-"-unknown_IP-"}
+        host_cbs[$i]=${host_cbs[$i]-"0"}
+    done
+}
+
+# Generate a summary report of callback counts by host from callback.dump,
+# sorted by descending number of callbacks.
+summarize_cbs() {
+    h_ips=${host_ips[@]} # list of IPs; no way to pass arrays directly to awk
+
+    echo "$self: Summary of callback counts by host index and IP address"
+    # The first line produces a preliminary report of callback counts per hostindex,
+    # one line per host:
+    #    <count> hi=<hostix>
+    #    ...
+    # The second line uses awk to improve the output and add the IP address for each host.
+
+    $cbdpath -all $dumpdir/callback.dump | cut -d ' ' -f 4 | sort | uniq -c | sort -nrk 1 |
+        $myawk -v host_ips="$h_ips" \
+            'BEGIN { split(host_ips,ips) }
+	{split($2, v, "=");
+	    hix=v[2]+1;	    # adjust for awk arrays which are 1-based
+	    print "cbs="$1, $2, "ip="ips[hix]}
+	'
+}
+
+# Report volids referenced by the specified host,
+list_vols_for_host() {
+    hostix=$1
+
+    h_ip=${host_ips[$hostix]}
+    h_cbhead=${host_cbs[$hostix]}
+
+    if ((hostix > maxix)); then
+        echo "$self: Host index $hostix is out of range; 0 - $maxix"
+        exit 1
+    fi
+
+    if [ $h_ip == "-unknown_IP-" -o $h_cbhead == "0" ]; then
+        echo "$self: Host index $hostix $h_ip has no callbacks"
+        exit 1
+    fi
+
+    echo "$self: Volumes referenced by host index $hostix $h_ip"
+
+    # cbd syntax is peculiar: its '-host' option does NOT take the host index
+    # but rather that host's head callback id.
+    # The first line produces a preliminary report of callbacks for the specified
+    # hostix.
+    #    <count> <volid>
+    #    ...
+    # The second line uses awk to improve the output.
+
+    $cbdpath -host $h_cbhead $dumpdir/callback.dump | cut -d ' ' -f 1 | sort | uniq -c | sort -nrk 1 |
+        $myawk '{print "cbs="$1, $2}'
+}
+
+subcmd=$1
+case $subcmd in
+    sig*)
+        signal_and_wait
+        ;;
+    sum*)
+        shift
+        dumpdir=${1-$dumpdir_default}
+        gethosts
+        summarize_cbs
+        ;;
+    vol*)
+        shift
+        hostix=$1
+        if [ -z "$hostix" ]; then
+            echo "$self: $subcmd requires an integer value for hostindex"
+            exit 1
+        fi
+        shift
+        dumpdir=${1-$dumpdir_default}
+        gethosts
+        list_vols_for_host "$hostix"
+        ;;
+    hel*)
+        echo ""
+        usage
+        ;;
+    *)
+        echo "$self: Unknown subcommand '$subcmd'"
+        echo ""
+        usage
+        ;;
+esac
