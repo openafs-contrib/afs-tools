@@ -22,6 +22,7 @@ OpenAFS distributed filesystem.
 
 ## Administration
 
+  * `afs-cbreport` - produce various reports on fileserver callbacks
   * `afs-client-accessd` - gather access info from the audit log into a database
   * `afsdirstat` - report afs directory statistics
   * `afs-dumpster` - nightly dumps of afs volumes
