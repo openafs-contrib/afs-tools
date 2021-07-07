@@ -1248,7 +1248,7 @@ interpolate_string($$)
 	# and so we can easily do things like %{FOO}BAR, and to make it very
 	# that this isn't normal perl variable interpolation.
 
-	$str =~ s/\%{([^}]+)}/
+	$str =~ s/\%\{([^}]+)\}/
 	          exists $valref->{$1} ?
 	                 $valref->{$1} :
 	                 die("Undefined substitution variable $1 in configuration")
