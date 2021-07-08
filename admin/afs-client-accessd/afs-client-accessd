@@ -743,16 +743,24 @@ get_dbname()
 
 # open the database, and prepare it for use
 sub
-sqlite_dbopen($)
+sqlite_dbopen($$)
 {
 	trace();
-	my ($filename) = @_;
-	my $dbh = DBI->connect("dbi:SQLite:dbname=$filename",
-	                       '', # username
-	                       '', # password
-	                       { AutoCommit => 0, RaiseError => 1,
-	                         InactiveDestroy => 1 }
-	) or die("Error opening sqlite db $filename: $DBI::errstr\n");
+	my ($filename, $highperf) = @_;
+	my $dbh = DBI->connect("dbi:SQLite:dbname=$filename")
+	    or die("Error opening sqlite db $filename: $DBI::errstr\n");
+
+	# Improve performance by disabling the following features
+	if ($highperf) {
+	    $dbh->do('PRAGMA synchronous = OFF');
+	    $dbh->do('PRAGMA journal_mode = OFF');
+	}
+
+	# AutoCommit must be disabled after PRAGMA synchronous
+	$dbh->{AutoCommit} = 0;
+	$dbh->{RaiseError} = 1;
+	$dbh->{InactiveDestroy} = 1;
+
 	return $dbh;
 }
 
@@ -766,9 +774,7 @@ start_collection()
 		return;
 	}
 
-	my $dbh = sqlite_dbopen($SQLITE_TEMP);
-	$dbh->do('PRAGMA synchronous = OFF');
-	$dbh->do('PRAGMA journal_mode = OFF');
+	my $dbh = sqlite_dbopen($SQLITE_TEMP, 1);
 
 	# This is effectively "CREATE TABLE IF NOT EXISTS ...", but that is new to
 	# sqlite 3.3, which we cannot assume we have. Instead query the
@@ -1031,7 +1037,7 @@ oracle_export(@)
 		my $err = 0;
 
 		eval {
-			$sqlite_dbh = sqlite_dbopen($path);
+			$sqlite_dbh = sqlite_dbopen($path, 0);
 			oracle_export_db($oracle_dbh, $sqlite_dbh, $hostname, $path, $timestr);
 		};
 		if ($@) {
@@ -1161,7 +1167,7 @@ sqlldr_export(@)
 		my $err = 0;
 
 		eval {
-			$sqlite_dbh = sqlite_dbopen($path);
+			$sqlite_dbh = sqlite_dbopen($path, 0);
 			sqlldr_export_db($sqlite_dbh, $hostname, $path, $timestr);
 		};
 		if ($@) {
