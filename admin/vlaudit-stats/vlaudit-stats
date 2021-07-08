@@ -1,0 +1,668 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: 0BSD
+#
+# Copyright (c) 2020, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+# REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+# AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+# INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+# LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+# OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+# PERFORMANCE OF THIS SOFTWARE.
+
+import argparse
+import collections
+import contextlib
+import errno
+import http
+import json
+import os
+import os.path
+import pprint
+import re
+import socket
+import socketserver
+import stat
+import sys
+import syslog
+import threading
+import time
+import traceback
+import xmlrpc.server
+
+NAME = 'vlaudit-stats'
+SOCK_NAME = 'vlaudit-stats.sock'
+MAX_DATA = 1024
+MAX_GAPS = 10
+
+def d(msg):
+    pass
+    #print(msg)
+def _log(prio, msg):
+    if _log.use_syslog:
+        syslog.syslog(prio, msg)
+    else:
+        print(msg)
+_log.use_syslog = False
+_log.quiet = False
+def info(msg):
+    if _log.quiet:
+        return
+    _log(syslog.LOG_INFO, msg)
+def warn(msg):
+    _log(syslog.LOG_WARNING, msg)
+def error(msg):
+    _log(syslog.LOG_ERR, msg)
+
+@contextlib.contextmanager
+def ignore_errno(code):
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno != code:
+            raise
+
+# A single piece of data in a HitTable. For example, the data for positive
+# volume lookups for volume "root.cell".
+class HitData:
+    def __init__(self, req):
+        self.first_req = req
+        self.last_req = req
+        self.count = 1
+
+    def record_req(self, req):
+        self.last_req = req
+        self.count += 1
+
+# A table recording "hits" of data. For example: used for recording positive
+# volume lookups.
+class HitTable:
+    max_items = MAX_DATA
+    item_name = None
+
+    def __init__(self, args, item_name):
+        self.n_hits = 0
+        self.table = collections.OrderedDict()
+        self.item_name = item_name
+
+        if args.top_limit != 0:
+            self.max_items = args.top_limit
+
+    def hit(self, key, req):
+        self.n_hits += 1
+
+        if key not in self.table:
+            self.table[key] = HitData(req)
+        else:
+            self.table[key].record_req(req)
+            self.table.move_to_end(key)
+
+        if len(self.table) > self.max_items * 2:
+            self.trim()
+
+    def __len__(self):
+        return len(self.table)
+
+    def trim(self):
+        need = len(self.table) - self.max_items
+        while need > 0:
+            self.table.popitem(last=False)
+            need -= 1
+
+    def stats(self):
+        top_data = sorted(self.table.items(), key=lambda x: x[1].count, reverse=True)
+
+        # only report the first 'max_items' hits
+        top_data = top_data[:self.max_items]
+
+        top_stats = [
+            {
+                self.item_name: key,
+                'n_hits':    val.count,
+                'first_req': val.first_req.stats(),
+                'last_req':  val.last_req.stats(),
+            }
+            for (key, val) in top_data
+        ]
+
+        return dict(
+            n_hits=self.n_hits,
+            max_top=self.max_items,
+            top=top_stats,
+        )
+
+# Our various VL stats that we record.
+class VLStats:
+    n_msgs = 0
+    last_msgid = -1
+    last_tstamp = None
+
+    n_bad = 0
+    last_bad = 0
+
+    n_restarts = 0
+    last_restart = None
+    last_restart_ts = None
+
+    audit_n_miss = 0
+    audit_gaps = None
+
+    audit_n_weird = 0
+    audit_weird_from = None
+    audit_weird_to = None
+    audit_weird_last = None
+    audit_weird_fromts = None
+    audit_weird_tots = None
+
+    def __init__(self, args):
+        self.args = args
+
+        self.ips = HitTable(args, 'host')
+        self.pos = HitTable(args, 'vol')
+        self.neg = HitTable(args, 'vol')
+        self.audit_gaps = collections.deque(maxlen=MAX_GAPS)
+
+    def now(self):
+        if self.args.force_time is None:
+            return int(time.time())
+        return self.args.force_time
+
+    def stats(self):
+        return dict(
+            audit=dict(
+                n_msgs=self.n_msgs,
+                n_unreadable=self.n_bad,
+                last_unreadable=self.last_bad,
+
+                n_miss=self.audit_n_miss,
+                gaps=[gap.stats() for gap in self.audit_gaps],
+
+                n_restarts=self.n_restarts,
+                last_restart_ts=self.last_restart_ts,
+
+                n_weird=self.audit_n_weird,
+                last_weird_fromid=self.audit_weird_from,
+                last_weird_toid=self.audit_weird_to,
+                last_weird_fromts=self.audit_weird_fromts,
+                last_weird_tots=self.audit_weird_tots,
+            ),
+            getentry=dict(
+                n_reqs=self.ips.n_hits,
+                host=self.ips.stats(),
+                pos=self.pos.stats(),
+                neg=self.neg.stats(),
+            ),
+        )
+
+    def message(self, msgid, tstamp):
+        self.n_msgs += 1
+
+        if msgid == 0:
+            self.last_msgid = -1
+            self.last_tstamp = None
+            self.restarted(tstamp)
+
+        if self.last_msgid >= 0:
+            # Our msgid should be exactly 1 higher than the last message that
+            # we got. If it's more than 1 higher, we missed some messages; if
+            # it's anything else, that's weird/wrong. (Possibly the vlserver
+            # restarted and we missed some messages.)
+            diff = msgid - self.last_msgid
+            if diff <= 0:
+                self.msgid_weird(self.last_msgid, msgid, self.last_tstamp, tstamp)
+            elif diff > 1:
+                self.msgid_gap(diff - 1, self.last_tstamp, tstamp)
+
+        self.last_msgid = msgid
+        self.last_tstamp = tstamp
+
+    def bad_line(self, line):
+        self.n_bad += 1
+        self.last_bad = self.now()
+
+    def getent(self, req):
+        self.ips.hit(req.host, req)
+        if req.code == 0:
+            self.pos.hit(req.reqvol, req)
+        else:
+            self.neg.hit(req.reqvol, req)
+
+    def restarted(self, tstamp):
+        self.n_restarts += 1
+        self.last_restart = self.now()
+        self.last_restart_ts = tstamp
+
+    def msgid_weird(self, from_id, to_id, from_ts, to_ts):
+        self.audit_n_weird += 1
+        self.audit_weird_from = from_id
+        self.audit_weird_to = to_id
+        self.audit_weird_last = self.now()
+        self.audit_weird_fromts = from_ts
+        self.audit_weird_tots = to_ts
+        warn("msgid went backwards: %d -> %d (audit tstamp %s -> %s)" % (
+             from_id, to_id, from_ts, to_ts))
+
+    def msgid_gap(self, n_miss, from_ts, to_ts):
+        self.audit_n_miss += n_miss
+        self.audit_gaps.append(AuditGap(n_miss, from_ts, to_ts, self.now()))
+
+class AuditGap:
+    def __init__(self, n_miss, from_ts, to_ts, now):
+        self.n_miss = n_miss
+        self.from_ts = from_ts
+        self.to_ts = to_ts
+        self.secs = now
+
+    def stats(self):
+        return dict(
+            n_miss=self.n_miss,
+            from_ts=self.from_ts,
+            to_ts=self.to_ts,
+            now=self.secs
+        )
+
+# The data for a single VL GetEntry request (as reported by the audit log).
+class GetEntryRequest:
+    def __init__(self, tstamp, match):
+        self.tstamp = tstamp
+
+        (code,
+         self.host,
+         self.reqvol,
+         volid,
+         self.volname) = match.group(1,2,4,5,6)
+
+        self.code = int(code)
+        self.volid = int(volid)
+
+    def stats(self):
+        ret = dict(
+            tstamp=self.tstamp,
+            host=self.host,
+            code=self.code,
+            vol_requested=self.reqvol,
+        )
+        if self.code == 0:
+            ret['vol_id'] = self.volid
+            ret['vol_name'] = self.volname
+        return ret
+
+# Our reader and parser of the VL audit log.
+class AuditReader:
+    # Match groups:
+    # 1: code
+    # 2: host
+    # 3: "STR" (for GetByName) or "LONG" (for GetByID)
+    # 4: requested vol name/id
+    # 5: rwid for returned volume
+    # 6: name for returned volume
+    #
+    # We don't really distinguish between GetEntryByID and GetEntryByName
+    # requests in here. If we wanted to in the future, just check for
+    # reqvol.isdigit() to see if it's a numeric request.
+    getent_pat = re.compile(r'^\[\d+\] ... ... \d\d \d\d:\d\d:\d\d \d{4} EVENT AFS_VL_GetEnt CODE ([0-9]+) NAME .* HOST ([^ ]+) (STR|LONG) (.*) LONG ([0-9]+) STR (.*) $')
+
+    # Match groups:
+    # 1: audit message id / counter
+    # 2: timestamp
+    metadata_pat = re.compile(r'^\[(\d+)\] (... ... \d\d \d\d:\d\d:\d\d \d{4})')
+
+    def __init__(self, args, vlstats):
+        self.args = args
+        self.vlstats = vlstats
+
+    def read_once(self, path, need_fifo=False):
+        with open(path) as fh:
+            st = os.fstat(fh.fileno())
+            if need_fifo:
+                if not stat.S_ISFIFO(st.st_mode):
+                    raise TypeError("%s is not a pipe" % path)
+            else:
+                if not stat.S_ISREG(st.st_mode):
+                    raise TypeError("%s is not a regular file" % path)
+
+            for line in fh:
+                # Don't rstrip() 'line' in here, in case some string like a
+                # volume name has a whitespace or newline etc in it.
+                match = self.metadata_pat.match(line)
+                if match is None:
+                    self.vlstats.bad_line(line)
+                    continue
+
+                (msgid, tstamp) = match.group(1,2)
+                msgid = int(msgid)
+
+                self.vlstats.message(msgid, tstamp)
+
+                match = self.getent_pat.match(line)
+                if match is None:
+                    d("unmatched line: %s" % line)
+                    continue
+
+                req = GetEntryRequest(tstamp, match)
+                self.vlstats.getent(req)
+
+    def read_forever(self, path):
+        info("Processing audit messages from %s" % path)
+        while True:
+            self.read_once(path, need_fifo=True)
+
+### Stuff for our unix socket xmlrpc server
+
+class UnixSocketXMLRPCRequestHandler(xmlrpc.server.SimpleXMLRPCRequestHandler):
+    # without this, SimpleXMLRPCRequestHandler tries to set TCP_NODELAY, which
+    # of course fails because we aren't a tcp socket
+    disable_nagle_algorithm = False
+
+# Basically the same as xmlrpc.server.SimpleXMLRPCServer, but uses a unix
+# domain socket instead of a TCP socket.
+class UnixSocketXMLRPCServer(socketserver.UnixStreamServer,
+                             xmlrpc.server.SimpleXMLRPCDispatcher):
+    def __init__(self, addr,
+                 requestHandler=UnixSocketXMLRPCRequestHandler,
+                 bind_and_activate=True, **kwargs):
+        self.logRequests = False
+        xmlrpc.server.SimpleXMLRPCDispatcher.__init__(self, **kwargs)
+
+        with ignore_errno(errno.ENOENT):
+            os.unlink(addr)
+        socketserver.UnixStreamServer.__init__(self, addr, requestHandler,
+                                               bind_and_activate)
+
+    # Support using this in a 'with' statement. The socketserver base class
+    # does this on its own with python 3.6+, but do it here so we can work with
+    # more versions.
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.server_close()
+
+### Stuff for our unix socket xmlrpc client
+
+class UnixSocketHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self.host)
+class UnixSocketTransport(xmlrpc.client.Transport):
+    def __init__(self, addr):
+        self.addr = addr
+        super().__init__()
+    def make_connection(self, host):
+        return UnixSocketHTTPConnection(self.addr)
+class UnixSocketXMLRPCClient(xmlrpc.client.ServerProxy):
+    def __init__(self, addr, **kwargs):
+        super().__init__("http://unused", transport=UnixSocketTransport(addr),
+                         **kwargs)
+
+### Our RPCs that can be called over xmlrpc
+
+class ServerFuncs:
+    def __init__(self, vlstats):
+        self.vlstats = vlstats
+
+    def stats_get(self):
+        return self.vlstats.stats()
+
+### Stuff for formatting out 'text' output for stats
+
+class objview:
+    def __init__(self, data):
+        self.data = data
+
+    @classmethod
+    def _wrapval(cls, val):
+        if isinstance(val, dict):
+            return objview(val)
+        if isinstance(val, list):
+            return [cls._wrapval(item) for item in val]
+        return val
+
+    def __getattr__(self, attr):
+        return self._wrapval(self.data[attr])
+
+def format_hittable(args, descr, ht, is_host=False):
+    if len(ht.top) == 0:
+        return
+
+    print()
+    print("top %s:" % descr)
+
+    if is_host:
+        item_name = 'host'
+    else:
+        item_name = 'vol'
+
+    for item in ht.top:
+        print(" - %s, %d hits" % (getattr(item, item_name), item.n_hits))
+
+        if is_host:
+            print("   first request: vol %s, time %s, code %d" %
+                  (item.first_req.vol_requested,
+                   item.first_req.tstamp,
+                   item.first_req.code))
+            print("   last request: vol %s, time %s, code %d" %
+                  (item.last_req.vol_requested,
+                   item.last_req.tstamp,
+                   item.last_req.code))
+        else:
+            print("   first request: host %s, time %s, code %d" %
+                  (item.first_req.host,
+                   item.first_req.tstamp,
+                   item.first_req.code))
+            print("   last request: host %s, time %s, code %d" %
+                  (item.last_req.host,
+                   item.last_req.tstamp,
+                   item.last_req.code))
+
+def format_stats(args, stats):
+    stats = objview(stats)
+
+    audit = stats.audit
+    print("%d audit messages processed" % audit.n_msgs)
+    print("%d unreadable messages skipped" % audit.n_unreadable)
+    if audit.last_unreadable != 0:
+        print(" - last unreadable message from %s" % time.ctime(audit.last_unreadable))
+
+    print("%d audit messages lost" % audit.n_miss)
+    for gap in audit.gaps:
+        print(" - lost %d messages during %s -> %s (at %s)" %
+              (gap.n_miss, gap.from_ts, gap.to_ts,
+               time.ctime(gap.now)))
+
+    print("%d out-of-order messages" % audit.n_weird)
+    if None not in (audit.last_weird_fromid, audit.last_weird_toid, audit.last_weird_fromts, audit.last_weird_tots):
+        print("last out-of-order message: %d -> %d (%s -> %s)" %
+              (audit.last_weird_fromid,
+               audit.last_weird_toid,
+               audit.last_weird_fromts,
+               audit.last_weird_tots))
+
+    if audit.last_restart_ts is None:
+        print("%d restarts" % audit.n_restarts)
+    else:
+        print("%d restarts (last restart: %s)" % (audit.n_restarts, audit.last_restart_ts))
+
+    getentry = stats.getentry
+    print("%d VL_GetEntryBy* requests (%d positive, %d negative)" %
+          (getentry.n_reqs, getentry.pos.n_hits, getentry.neg.n_hits))
+
+    format_hittable(args, "hosts", getentry.host, is_host=True)
+    format_hittable(args, "positive volumes", getentry.pos)
+    format_hittable(args, "negative volumes", getentry.neg)
+
+### Script startup, arg processing, etc
+
+def socket_path(args):
+    if args.socket is not None:
+        # If we were given a socket path explicitly, use that.
+        return args.socket
+
+    if getattr(args, 'auditlog', None) is not None:
+        # If we were given an auditlog path, use a socket in that same dir.
+        logdir = os.path.dirname(args.auditlog)
+    else:
+        # Otherwise, we need to guess where our socket is. This must be for a
+        # client (since the server requires the 'auditlog' arg, handled above),
+        # so just try some common locations, and pick the one where our socket
+        # exists. If multiple exist, choose the logdir with the newest VLLog.
+        best_logdir = None
+        best_mtime = None
+        for path in ['/usr/afs/logs', '/var/openafs/logs',
+                     '/opt/openafs/var/openafs/logs']:
+            sock = os.path.join(path, SOCK_NAME)
+            if os.path.exists(sock):
+                vllog = os.path.join(path, 'VLLog')
+                vllog_mtime = 0
+                if os.path.isfile(vllog):
+                    st = os.stat(vllog)
+                    vllog_mtime = st.st_mtime
+                if best_mtime is None or vllog_mtime > best_mtime:
+                    best_logdir = path
+                    best_mtime = st.st_mtime
+        logdir = best_logdir
+        if logdir is None:
+            raise RuntimeError("Cannot guess path to %s; use --socket to "
+                               "provide the socket path." % SOCK_NAME)
+
+    return os.path.join(logdir, SOCK_NAME)
+
+def main_statsget(args):
+    do_bench = False
+
+    if args.from_auditlog is None:
+        # Read stats from daemon process
+        client = UnixSocketXMLRPCClient(socket_path(args), allow_none=True)
+        stats = client.stats_get()
+
+    else:
+        # Process the given audit log ourselves
+        vlstats = VLStats(args)
+        reader = AuditReader(args, vlstats)
+
+        if args.bench:
+            do_bench = True
+            start = time.time()
+
+        reader.read_once(args.from_auditlog)
+
+        if args.bench:
+            duration = time.time() - start
+
+        stats = vlstats.stats()
+
+    if args.top_limit != 0:
+        def limit_top(table):
+            table['top'] = table['top'][:args.top_limit]
+        limit_top(stats['getentry']['host'])
+        limit_top(stats['getentry']['pos'])
+        limit_top(stats['getentry']['neg'])
+
+    if args.format == 'raw':
+        pprint.pprint(stats, compact=False, width=160)
+    elif args.format == 'text':
+        format_stats(args, stats)
+    elif args.format == 'json':
+        json.dump(stats, sys.stdout)
+    else:
+        raise TypeError("Bad output format: %s" % args.format)
+
+    if do_bench:
+        n_msgs = stats['audit']['n_msgs']
+        persec = n_msgs / duration
+        print("Bench: processed %d messages in %.2f seconds (%.2f msg/s)" % (
+              n_msgs, duration, persec))
+
+def main_daemon(args):
+    _log.use_syslog = True
+    syslog.openlog(NAME, syslog.LOG_PID, syslog.LOG_DAEMON)
+
+    vlstats = VLStats(args)
+
+    # Startup the xmlrpc server
+    def serve_xmlrpc():
+        try:
+            server = UnixSocketXMLRPCServer(socket_path(args), allow_none=True)
+            with server:
+                server.register_introspection_functions()
+                server.register_instance(ServerFuncs(vlstats))
+                server.serve_forever()
+        except:
+            # Make sure an uncaught exception kills the whole process, not just
+            # this thread.
+            for line in traceback.format_exc():
+                error(line)
+            sys.exit(1)
+    xmlrpc_thread = threading.Thread(target=serve_xmlrpc, daemon=True)
+    xmlrpc_thread.start()
+
+    # Read/process our audit data
+    reader = AuditReader(args, vlstats)
+    reader.read_forever(args.auditlog)
+
+def add_common_args(parser, sub=False):
+    extra_args = {}
+    if sub:
+        # Prevents the defaults for these args in the sub-parser from
+        # overwriting the values in the global parser.
+        extra_args = dict(default=argparse.SUPPRESS)
+
+    parser.add_argument('--socket',
+                        help="path to vlaudit-stats xmlrpc socket",
+                        **extra_args)
+
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help="suppress informational messages",
+                        **extra_args)
+
+    defaults = {}
+    if not sub:
+        defaults['default'] = 0
+    parser.add_argument('--top-limit', type=int, metavar='LIMIT',
+                        help="limit top-lists to this many entries (default=%d)" % MAX_DATA,
+                        **extra_args, **defaults)
+
+    # Primarily for testing, so hide this option in the help output.
+    parser.add_argument('--force-time', type=int,
+                        help=argparse.SUPPRESS,
+                        **extra_args)
+
+def create_subparser(subparsers, name, func):
+    parser = subparsers.add_parser(name)
+    parser.set_defaults(func=func)
+    add_common_args(parser, sub=True)
+    return parser
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+
+    subparsers = parser.add_subparsers()
+    subparsers.required = True
+    subparsers.dest = 'command'
+
+    parser_daemon = create_subparser(subparsers, 'daemon', main_daemon)
+    parser_daemon.add_argument('auditlog',
+                               help="path to vlserver audit pipe")
+
+    parser_statsget = create_subparser(subparsers, 'stats-get', main_statsget)
+    parser_statsget.add_argument('--format', '-f', default='text',
+                                 choices=['text', 'raw', 'json'],
+                                 help="output format")
+    parser_statsget.add_argument('--from-auditlog',
+                                 help="generate stats from auditlog file (instead of from a daemon process)")
+    parser_statsget.add_argument('--bench', action='store_true',
+                                 help="with --from-auditlog, benchmark audit processing")
+
+    return parser.parse_args(argv)
+
+def main(argv):
+    args = parse_args(argv)
+    _log.quiet = args.quiet
+    args.func(args)
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

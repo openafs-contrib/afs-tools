@@ -1,0 +1,25 @@
+10 audit messages processed
+0 unreadable messages skipped
+2 audit messages lost
+ - lost 2 messages during Tue Nov 24 17:00:16 2020 -> Tue Nov 24 17:00:17 2020 (at Mon Dec  7 23:29:38 2020)
+0 out-of-order messages
+1 restarts (last restart: Tue Nov 24 16:59:04 2020)
+4 VL_GetEntryBy* requests (3 positive, 1 negative)
+
+top hosts:
+ - 192.0.2.5, 4 hits
+   first request: vol 536870913, time Tue Nov 24 17:00:16 2020, code 0
+   last request: vol vol.fake, time Tue Nov 24 17:00:18 2020, code 363524
+
+top positive volumes:
+ - root.cell, 2 hits
+   first request: host 192.0.2.5, time Tue Nov 24 17:00:17 2020, code 0
+   last request: host 192.0.2.5, time Tue Nov 24 17:00:17 2020, code 0
+ - 536870913, 1 hits
+   first request: host 192.0.2.5, time Tue Nov 24 17:00:16 2020, code 0
+   last request: host 192.0.2.5, time Tue Nov 24 17:00:16 2020, code 0
+
+top negative volumes:
+ - vol.fake, 1 hits
+   first request: host 192.0.2.5, time Tue Nov 24 17:00:18 2020, code 363524
+   last request: host 192.0.2.5, time Tue Nov 24 17:00:18 2020, code 363524
