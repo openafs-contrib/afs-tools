@@ -1,8 +1,6 @@
-#!/bin/sh
+#!/usr/bin/env python3
 #
-# Report free space on afs servers.
-#
-# Copyright (c) 2016, Sine Nomine Associates
+# Copyright (c) 2016-2022, Sine Nomine Associates
 #
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -17,41 +15,277 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
-CELLOPT=
-usage() {
-    echo "usage: afsfree [-cell <cellname>] [-noresolve]" 2>&1
-    exit 1
-}
+"""
+Report free and used space on OpenAFS file servers.
+"""
 
-while [ $# -ne 0 ]; do
-    case "$1" in
-    -c|-cell)
-        if [ "x$2" = "x" ]; then
-            echo "afsfree: missing cellname argument." 2>&1
-            usage
-        fi
-        CELLOPT="-cell $2"
-        shift
-        ;;
-    -n|-nor*)
-        NORESOPT="-noresolve"
-        ;;
-    *)
-        usage
-        ;;
-    esac
-    shift
-done
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
 
-printf "%-24s %-8s %5s %5s %5s %s\n" host part size used avail used%
-for host in `vos listaddrs -noauth $CELLOPT $NORESOPT | sort`
-do
-    vos partinfo -server $host -noauth |
-    sed 's/\/vicep//; s/://' |
-    awk -v host=$host '{
-        printf("%-24s %-8s %4dG %4dG %4dG  %3d%%\n",
-                host, $5, $12/1024/1024,
-                ($12-$6)/1024/1024, $6/1024/1024,
-                (($12-$6)/$12)*100)}'
-done
+DEBUG = os.environ.get('AFSFREE_DEBUG', '0') == '1'
 
+KiB = 1024
+MiB = KiB * 1024
+GiB = MiB * 1024
+TiB = GiB * 1024
+
+
+def debug(msg):
+    if DEBUG:
+        sys.stderr.write('DEBUG: {0}\n'.format(msg))
+
+
+def warning(msg):
+    sys.stderr.write('WARNING: {0}\n'.format(msg))
+
+
+def error(msg):
+    sys.stderr.write('ERROR: {0}\n'.format(msg))
+
+
+def fatal(msg):
+    raise AssertionError(msg)
+
+
+def humanize(size):
+    """
+    Convert bytes to human readable units.
+    """
+    if size >= TiB:
+        value = size / TiB
+        units = 'T'
+    elif size >= GiB:
+        value = size / GiB
+        units = 'G'
+    elif size >= MiB:
+        value = size / MiB
+        units = 'M'
+    elif size >= KiB:
+        value = size / KiB
+        units = 'K'
+    else:
+        value = float(size)
+        units = ''
+    return '{0:.0f}{1}'.format(value, units)
+
+
+def lookup_hostname(address):
+    """
+    Resolve the hostname from the IP address.
+    """
+    try:
+        hostname, _, _ = socket.gethostbyaddr(address)
+        debug('{0} -> {1}'.format(address, hostname))
+    except Exception as e:
+        warning('Failed to resolve {0}: {1}'.format(address, e))
+        hostname = None
+    return hostname
+
+
+def lookup_address(hostname):
+    """
+    Resolve the IP address from the hostname.
+    """
+    try:
+        address = socket.gethostbyname(hostname)
+        debug('{0} -> {1}'.format(hostname, address))
+    except Exception as e:
+        warning('Failed to resolve {0}: {1}'.format(address, e))
+        address = None
+    return address
+
+
+def vos(command, **kwargs):
+    """
+    Execute a vos command and return stdout as a list of strings.
+    """
+    args = ['vos', command]
+    for name, value in kwargs.items():
+        if value is None:
+            pass
+        elif value is True:
+            args.append('-%s' % name)
+        else:
+            args.extend(['-%s' % name, value])
+    debug('Running {0}'.format(' '.join(args)))
+    proc = subprocess.Popen(args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    output = proc.communicate()[0].decode('utf-8').splitlines()
+    errors = proc.communicate()[1].decode('utf-8').splitlines()
+    for line in errors:
+        if 'running unauthenticated' not in line:  # Suppress unauth noise.
+            error(line)
+    for line in output:
+        debug(line)
+    return output
+
+
+def lookup_servers(cell=None):
+    """
+    Lookup the file servers for this cell.
+    """
+    # Run vos listaddrs to get the list of registered file servers and the
+    # list of ip addresses for each server.
+    file_servers = {}
+    uuid = None
+    listaddrs = vos('listaddrs', cell=cell, printuuid=True, noresolve=True)
+    for i, line in enumerate(listaddrs):
+        if not line:
+            uuid = None
+        elif line.startswith('UUID:'):
+            uuid = line.replace('UUID:', '', 1).strip()
+            if uuid not in file_servers:
+                file_servers[uuid] = []
+        else:
+            if not uuid:
+                raise ValueError('Unexpected vos listaddrs output on line '
+                                 '{1}: {2}', i, line)
+            file_servers[uuid].append(line)
+    # Try each multi-homed address to find a hostname for the server.
+    servers = set()
+    for addresses in file_servers.values():
+        for address in addresses:
+            hostname = lookup_hostname(address)
+            if hostname and lookup_address(hostname):
+                servers.add(hostname)
+                break
+        else:
+            fatal('hostname not found for {0}'.format(','.join(addresses)))
+    return list(servers)
+
+
+def calculate_used(free, total):
+    """
+    Calculate the used space and the used percent from the
+    available and the total space.
+    """
+    if total > free:
+        used = total - free
+    else:
+        used = total
+    if total > 0:
+        usedp = round((used / total) * 100.0, 1)
+    else:
+        usedp = 100.0
+    if usedp < 0.1:
+        usedp = 0.0
+    if usedp > 100.0:
+        usedp = 100.0
+    return (used, usedp)
+
+
+def get_partinfo(cell, server):
+    """
+    Get the file server partition information.
+    """
+    parts = {}
+    for partition in vos('partinfo', cell=cell, server=server):
+        m = re.match(r'Free space on partition /vicep([a-z]+): '
+                     r'(\d+) K blocks out of total (\d+)', partition)
+        if m:
+            partid = m.group(1)
+            free = int(m.group(2)) * KiB
+            size = int(m.group(3)) * KiB
+            used, usedp = calculate_used(free, size)
+            parts[partid] = dict(size=size, used=used, free=free, usedp=usedp)
+    return parts
+
+
+def afsfree(cell, servers):
+    """
+    Get the partition used and free space from each server in a cell.
+    """
+    if not servers:
+        servers = lookup_servers(cell)
+    results = {}
+    for server in servers:
+        results[server] = get_partinfo(cell, server)
+    return results
+
+
+def flatten(results):
+    """
+    Flatten the server and partition dicts to a list of tuples.
+    """
+    table = []
+    for server, parts in results.items():
+        for part, info in parts.items():
+            table.append((server, part, info['size'], info['used'],
+                         info['free'], info['usedp']))
+    return table
+
+
+def make_template(text_table):
+    """
+    Generate the format template for text output lines.
+
+    Find the column format width for each table column. Left align the first
+    and second column and right align the rest of the columns.  The columns
+    will be vertically aligned when the output is printed with a monospaced
+    font.
+    """
+    spacer = '   '
+    column_formats = []
+    for i, column in enumerate(zip(*text_table)):
+        align = '<' if i == 0 or i == 1 else '>'
+        width = max([len(s) for s in column])
+        column_format = '{%d:%c%d}' % (i, align, width)
+        column_formats.append(column_format)
+    return spacer.join(column_formats)
+
+
+def print_table(results):
+    """
+    Output the results as text table with one line per server/partition pair.
+    """
+    table = [('server', 'part', 'size', 'used', 'free', 'used%')]
+    for row in sorted(flatten(results)):
+        server = row[0]
+        part = row[1]
+        size = humanize(row[2])
+        used = humanize(row[3])
+        free = humanize(row[4])
+        usedp = '{:.0f}%'.format(row[5])
+        table.append((server, part, size, used, free, usedp))
+    template = make_template(table)
+    for row in table:
+        print(template.format(*row))
+
+
+def print_plain(results):
+    """
+    Output the results as one line per server/partition pair.
+    """
+    for row in sorted(flatten(results)):
+        print(' '.join([str(x) for x in row]))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Show free and used space on OpenAFS file servers.')
+    parser.add_argument('--servers', '-servers', nargs='*',
+                        default=None)
+    parser.add_argument('--cell', '-cell')
+    parser.add_argument('--format', '-format',
+                        choices=['table', 'plain', 'json'], default='table')
+    options = parser.parse_args()
+
+    results = afsfree(options.cell, options.servers)
+    if options.format == 'table':
+        print_table(results)
+    elif options.format == 'plain':
+        print_plain(results)
+    elif options.format == 'json':
+        print(json.dumps(results))
+    else:
+        fatal('Invalid -format option: {}'.format(options.format))
+
+
+if __name__ == '__main__':
+    main()
