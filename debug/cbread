@@ -1,0 +1,505 @@
+#!/usr/bin/python
+# Copyright (c) 2024, Sine Nomine Associates
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+"""
+Read OpenAFS File Server callback dumps
+---------------------------------------
+
+Sending a SIGXCPU signal to the File Server will trigger a dump of the callback
+memory objects to disk.  This utility analyzes the callback and host dump files
+to assist in troubleshooting.
+
+The dump files are written to the server local state directory (the path is set
+at compile time).  The File Server logs the location of the dump files to the
+FileLog when the files are dumped to disk.
+
+The callback dump feature is intended for troubleshooting and should be used
+with caution. Triggering dumps frequently will impact server performance.
+
+How to trigger a callback dump
+------------------------------
+
+Send the SIGXCPU signal to the running dafileserver process to trigger the
+callback dump. This must be done as root. For example:
+
+    # kill -XCPU `pidof /usr/afs/bin/dafileserver`
+
+Alternatively, the Bos Server can provide the file server process id (since the
+Bos Server manages the server processes). When the bossever is started with
+the "-pidfiles" option, it will maintain a pid file for each server process.
+The pid files are located in the same directory as the "BosConfig" file.  To
+use this method to trigger the callback dump:
+
+    # kill -XCPU `cat /usr/afs/local/dafs.file.pid`
+
+Check the File Server log to verify the dump was triggered and to determine the
+path to the dump files.
+
+    # tail /usr/afs/logs/FileLog
+    ...
+    <timestamp> Created host dump /usr/afs/local/hosts.dump
+    <timestamp> Created client dump /usr/afs/local/client.dump
+    ...
+
+Be sure to set the "read" mode file permission bits on the dump files if they
+are not already set.
+
+    # ls -la /usr/afs/local/*.dump
+    # chmod +r /usr/afs/local/*.dump
+
+Reading the callback dump
+-------------------------
+
+The cbread program can be used to extract information from the dump files. It
+can be run directly on the server or on another machine after transferring the
+dump files.
+
+The usage is:
+
+    cbread stats [--dump-dir <path>]
+    cbread list [--dump-dir <path>] [--limit <number>] [--group-by "host"|"volume"]
+
+where:
+
+    stats   Display summary statistics
+    list    List callbacks per hosts and volumes (descending order).
+
+options:
+
+    --dump-dir <path>  Specify the path to the callback.dump and hosts.dump
+                       files. The default is "/usr/afs/local".
+   --limit <number>    Limit the list output to a given number of lines.
+   --group-by <name>   Show callbacks per host or callbacks per volume
+
+Examples
+--------
+
+Display a statistical summary of the callbacks:
+
+    # cbread stats
+    dump-version                            2
+    hosts                                   5
+    volumes                                86
+    files                                 375
+    callbacks                             382
+    number-of-blocks                   512000
+    file-hash-table-buckets               512
+    max-file-chain                          4
+    max-callback-chain                      2
+    memory-allocated                 32768000
+    memory-used                         24224
+    memory-available                 32743776
+    out-of-memory-incidents                 0
+
+Show the ten host/volume pairs with the most callbacks.
+
+    # cbread list --limit 10
+    199.167.73.139 536872714 97
+    199.167.73.139 536872499 58
+    199.167.73.139 536872723 22
+    199.167.73.139 536875955 19
+    199.167.73.139 536872907 11
+    199.167.73.139 536872795 8
+    199.167.73.149 536871188 6
+    199.167.73.139 536872719 3
+    199.167.73.139 536878351 3
+    199.167.73.139 536872744 3
+
+Show the five hosts with the most callbacks.
+
+    # cbread list --group-by host --limit 5
+    199.167.73.139 251
+    199.167.73.149 123
+    173.88.194.142 6
+    128.2.149.27 1
+    141.142.41.14 1
+
+Show the five volumes with the most callbacks:
+
+    # cbread list --group-by volume --limit 5
+    536872714 97
+    536872499 58
+    536872723 22
+    536875955 19
+    536872907 11
+
+"""
+
+
+import re
+import argparse
+import sys
+import struct
+import collections
+import os
+
+VERSION = "1.0"
+
+MAGIC = 0x12345678
+MAGICV2 = 0x12345679
+MAGICV3 = 0x1234567A
+
+Counters = collections.namedtuple(
+    "Counters",
+    [
+        "DeleteFiles",
+        "DeleteCallBacks",
+        "BreakCallBacks",
+        "AddCallBacks",
+        "GotSomeSpaces",
+        "DeleteAllCallBacks",
+        "nFEs",
+        "nCBs",
+        "nblks",
+        "CBsTimedOut",
+        "nbreakers",
+        "GSS1",
+        "GSS2",
+        "GSS3",
+        "GSS4",
+        "GSS5",
+    ],
+)
+
+FileEntry = collections.namedtuple(
+    "FileEntry",
+    [
+        "vnode",
+        "unique",
+        "volid",
+        "fnext",
+        "ncbs",
+        "firstcb",
+        "status",
+        "spare",
+    ],
+)
+
+CallBack = collections.namedtuple(
+    "CallBack",
+    [
+        "cnext",
+        "fhead",
+        "thead",
+        "status",
+        "flags",
+        "spare",
+        "hhead",
+        "tprev",
+        "tnext",
+        "hprev",
+        "hnext",
+    ],
+)
+
+
+class HostsDump:
+    """
+    Read host.dump files.
+    """
+
+    def __init__(self, dump_dir):
+        """
+        Parse the host.dump file.
+        """
+        dumpfile = os.path.join(dump_dir, "hosts.dump")
+        with open(dumpfile, "r") as f:
+            contents = f.read().replace("\n\t", "")
+        self.hosts = {}
+        for line in contents.splitlines()[2:]:
+            host = self._parse(line)
+            index = host["hidx"]
+            self.hosts[index] = host
+
+    def _parse(self, line):
+        """
+        Parse a single host dump entry.
+        """
+        pattern = (
+            r"ip:([\d.]+) port:(\d+) hidx:(\d+) cbid:(\d+) lock:(\d+) "
+            r"last:(\d+) active:(\d+) down:(\d+) del:(\d+) cons:(\d+) "
+            r"cldel:(\d+) hpfailed:(\d+) hcpsCall:(\d+) hcps \[(.*)\] "
+            r"\[(.*)\] refCount:(\d+) hostFlags:(\d+)"
+        )
+        m = re.match(pattern, line)
+        if not m:
+            raise ValueError("Invalid hosts.dump data: {0}".format(line))
+        fields = m.groups()
+        host = {
+            "ip": fields[0],
+            "port": int(fields[1]),
+            "hidx": int(fields[2]),
+            "cbid": int(fields[3]),
+            "lock": int(fields[4]),
+            "last": int(fields[5]),
+            "active": int(fields[6]),
+            "down": int(fields[7]),
+            "del": int(fields[8]),
+            "cons": int(fields[9]),
+            "cldel": int(fields[10]),
+            "hpfailed": int(fields[11]),
+            "hcpsCall": int(fields[12]),
+            "hcps": list(map(int, fields[13].lstrip().split())),
+            "interfaces": fields[14].lstrip().split(),
+            "refCount": int(fields[15]),
+            "hostFlags": int(fields[16]),
+        }
+        return host
+
+    def host(self, index):
+        """
+        Get a host dict by index.
+        """
+        return self.hosts.get(index, None)
+
+
+class CallbackDump:
+    """
+    Decode callback.dump files.
+    """
+
+    def __init__(self, dump_dir):
+        """
+        Decode the callback.dump file.
+        """
+        self.max_fe_chain = 0
+        self.max_cb_chain = 0
+        dumpfile = os.path.join(dump_dir, "callback.dump")
+        with open(dumpfile, "rb") as f:
+            self.magic = struct.unpack("i", f.read(4))[0]
+            if self.magic not in (MAGIC, MAGICV2, MAGICV3):
+                raise ValueError(
+                    "Invalid file magic number: 0x{0:04x}".format(self.magic)
+                )
+            self.now = struct.unpack("I", f.read(4))[0]
+            self.counters = Counters(*struct.unpack("16i", f.read(64)))
+            if self.magic == MAGICV3:
+                hash_size = struct.unpack("I", f.read(4))[0]
+                if hash_size == 0:
+                    raise ValueError("Invalid hash size: {0}".format(hash_size))
+            else:
+                hash_size = 512
+            self.timeouts = struct.unpack("8I", f.read(32))
+            self.timeout = struct.unpack("128I", f.read(512))
+            self.timeout_first = struct.unpack("I", f.read(4))
+            self.cb_free_list = struct.unpack("I", f.read(4))
+            self.fe_free_list = struct.unpack("I", f.read(4))
+            self.hash_table = struct.unpack(
+                "{0}I".format(hash_size), f.read(hash_size * 4)
+            )
+            # Unpack cb and fe blocks as needed.
+            self.cb_blocks = f.read(self.counters.nblks * 32)
+            self.fe_blocks = f.read(self.counters.nblks * 32)
+
+    def version(self):
+        versions = {
+            MAGIC: 1,
+            MAGICV2: 2,
+            MAGICV3: 3,
+        }
+        return versions[self.magic]
+
+    def memory_allocated(self):
+        return self.counters.nblks * 2 * 32
+
+    def memory_used(self):
+        return (self.counters.nFEs + self.counters.nCBs) * 32
+
+    def memory_available(self):
+        return self.memory_allocated() - self.memory_used()
+
+    def cb(self, index):
+        if index < 1 or index > self.counters.nblks:
+            raise ValueError("index {0} is out of range".format(index))
+        size = 32
+        offset = (index - 1) * size
+        block = self.cb_blocks[offset : offset + size]
+        return CallBack(*struct.unpack("IIbbbbIIIII", block))
+
+    def fe(self, index):
+        if index < 1 or index > self.counters.nblks:
+            raise ValueError("index {0} is out of range".format(index))
+        size = 32
+        offset = (index - 1) * size
+        block = self.fe_blocks[offset : offset + size]
+        return FileEntry(*struct.unpack("IIIIIIII", block))
+
+    def walk(self):
+        """
+        Get each (file-entry, callback) tuple.
+
+        For every file entry hash table bucket, walk the file entries, and for
+        each file entry, walk the callback chains and emit the callback and the
+        fe it belongs to.
+
+        Keep track of the longest chains seen for the stats output.  Assert if
+        a chain loop is detected.
+        """
+        for i in self.hash_table:
+            fe_chain_length = 0
+            while i:
+                fe_chain_length += 1
+                assert fe_chain_length <= self.counters.nblks
+                fe = self.fe(i)
+                j = fe.firstcb
+                cb_chain_length = 0
+                while j:
+                    cb_chain_length += 1
+                    assert cb_chain_length <= self.counters.nblks
+                    cb = self.cb(j)
+                    yield (fe, cb)
+                    j = cb.cnext
+                self.max_cb_chain = max(self.max_cb_chain, cb_chain_length)
+                i = fe.fnext
+            self.max_fe_chain = max(self.max_fe_chain, fe_chain_length)
+
+
+def descending_order(counts, limit=0):
+    """
+    Convert a dict to a list of key,value tuples sorted in descending
+    order by value.
+    """
+    ordered = sorted(counts.items(), key=lambda c: c[1], reverse=True)
+    if limit:
+        ordered = ordered[0:limit]
+    return ordered
+
+
+def report_default(hosts, callbacks, limit):
+    """
+    Display the number of callbacks per host/volume pairs one line each, in
+    descending order.
+    """
+    counts = {}
+    for fe, cb in callbacks.walk():
+        key = (cb.hhead, fe.volid)
+        counts[key] = counts.get(key, 0) + 1
+
+    for key, number in descending_order(counts, limit):
+        index, volume = key
+        ip = hosts.host(index)["ip"]
+        sys.stdout.write("{0} {1} {2}\n".format(ip, volume, number))
+
+
+def report_hosts(hosts, callbacks, limit):
+    """
+    Display the number of callbacks per host one line each, in descending
+    order.
+    """
+    counts = {}
+    for _, cb in callbacks.walk():
+        counts[cb.hhead] = counts.get(cb.hhead, 0) + 1
+
+    for index, number in descending_order(counts, limit):
+        ip = hosts.host(index)["ip"]
+        sys.stdout.write("{0} {1}\n".format(ip, number))
+
+
+def report_volumes(callbacks, limit):
+    """
+    Display the number of callbacks per volume one line each, in descending
+    order.
+    """
+    counts = {}
+    for fe, _ in callbacks.walk():
+        counts[fe.volid] = counts.get(fe.volid, 0) + 1
+
+    for volume, number in descending_order(counts, limit):
+        sys.stdout.write("{0} {1}\n".format(volume, number))
+
+
+def report_stats(callbacks):
+    """
+    Display a summary of callback stats.
+    """
+    stats = collections.OrderedDict()
+    stats["dump-version"] = callbacks.version()
+    stats["hosts"] = 0
+    stats["volumes"] = 0
+    stats["files"] = callbacks.counters.nFEs
+    stats["callbacks"] = callbacks.counters.nCBs
+    stats["number-of-blocks"] = callbacks.counters.nblks
+    stats["file-hash-table-buckets"] = len(callbacks.hash_table)
+    stats["max-file-chain"] = 0
+    stats["max-callback-chain"] = 0
+    stats["memory-allocated"] = callbacks.memory_allocated()
+    stats["memory-used"] = callbacks.memory_used()
+    stats["memory-available"] = callbacks.memory_available()
+    stats["out-of-memory-incidents"] = callbacks.counters.GotSomeSpaces
+
+    hosts_seen = set()
+    volumes_seen = set()
+    for fe, cb in callbacks.walk():
+        hosts_seen.add(cb.hhead)
+        volumes_seen.add(fe.volid)
+
+    stats["hosts"] = len(hosts_seen)
+    stats["volumes"] = len(volumes_seen)
+    stats["max-file-chain"] = callbacks.max_fe_chain
+    stats["max-callback-chain"] = callbacks.max_cb_chain
+
+    for name, value in stats.items():
+        sys.stdout.write("{0:<24} {1:>16}\n".format(name, value))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Display OpenAFS File Server callback dump information.",
+    )
+    parser.add_argument(
+        "command",
+        choices=["list", "stats", "version"],
+        help="Type of report to produce.",
+    )
+    parser.add_argument(
+        "--dump-dir",
+        metavar="<path>",
+        default="/usr/afs/local",
+        help="Path to the callback dump files [default: %(default)s]",
+    )
+    parser.add_argument(
+        "--limit", metavar="<number>", type=int, help="Limit list output"
+    )
+    parser.add_argument(
+        "--group-by",
+        choices=["host", "volume", "default"],
+        default="default",
+        help="Group list output by hosts, volumes, or host/volume pairs",
+    )
+
+    args = parser.parse_args()
+    if args.command == "version":
+        sys.stdout.write("{0} version {1}\n".format(parser.prog, VERSION))
+        return 0
+
+    hosts = HostsDump(args.dump_dir)
+    callbacks = CallbackDump(args.dump_dir)
+
+    if args.command == "stats":
+        report_stats(callbacks)
+    elif args.command == "list":
+        if args.group_by == "host":
+            report_hosts(hosts, callbacks, args.limit)
+        elif args.group_by == "volume":
+            report_volumes(callbacks, args.limit)
+        else:
+            report_default(hosts, callbacks, args.limit)
+    else:
+        raise AssertionError("Unexpected command: {0}".format(args.command))
+    return 0
+
+
+if __name__ == "__main__":
+    main()
