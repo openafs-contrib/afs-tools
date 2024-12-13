@@ -22,7 +22,6 @@ OpenAFS distributed filesystem.
 
 ## Administration
 
-  * `afs-cbreport` - produce various reports on fileserver callbacks
   * `afs-client-accessd` - gather access info from the audit log into a database
   * `afsdirstat` - report afs directory statistics
   * `afs-dumpster` - nightly dumps of afs volumes
@@ -41,6 +40,7 @@ OpenAFS distributed filesystem.
 
   * `cachemiss` - report cache miss rates
   * `cachestat` - report what is cached for certain files
+  * `cbread` - decode file server callback dump files
   * `ciread` - decode cache manager `CacheItems` file
   * `cisearch`- search cache manager `CacheItems` for a file
   * `dirobj` - decode afs directory objects
